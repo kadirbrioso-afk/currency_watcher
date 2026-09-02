@@ -15,6 +15,8 @@ Para combinar tkinter con asyncio se usa la siguiente estrategia:
 
 from __future__ import annotations
 
+import csv
+import json
 import queue
 import threading
 import tkinter as tk
@@ -24,7 +26,7 @@ from typing import Any, Callable
 
 import ttkbootstrap as ttk
 
-from alerts import evaluate, is_periodic
+from alerts import describe_condition, evaluate, is_periodic
 from config import (
     CONDITIONS,
     PERIOD_OPTIONS,
@@ -268,8 +270,8 @@ class CurrencyWatcherUI:
         self.history = history
 
         self.root.title("Currency Watcher — Monitor de tipos de cambio")
-        self.root.geometry("980x760")
-        self.root.minsize(820, 600)
+        self.root.geometry("980x800")
+        self.root.minsize(860, 660)
 
         # Estado de precios: {MONEDA: {"rate": float, "prev": float|None, "time": str}}
         self.rates_state: dict[str, dict[str, Any]] = {}
@@ -407,7 +409,7 @@ class CurrencyWatcherUI:
         cols_frame.pack(fill="x")
 
         columns = ("fav", "clock", "currency", "currency_name", "price", "time", "change", "change_pct", "status")
-        self.tree = ttk.Treeview(cols_frame, columns=columns, show="headings", height=7)
+        self.tree = ttk.Treeview(cols_frame, columns=columns, show="headings", height=6)
 
         headings = [
             ("fav", "Fav"),
@@ -433,7 +435,8 @@ class CurrencyWatcherUI:
         }
         for col_name, text in headings:
             self.tree.heading(col_name, text=text)
-            self.tree.column(col_name, width=widths[col_name], anchor="w")
+            anchor = "center" if col_name in ("fav", "status") else "w"
+            self.tree.column(col_name, width=widths[col_name], anchor=anchor)
 
         scroll = ttk.Scrollbar(cols_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -453,7 +456,7 @@ class CurrencyWatcherUI:
         # Panel de gráfico histórico (Canvas nativo).
         chart_frame = ttk.LabelFrame(self.root, text="Evolución histórica", padding=6)
         chart_frame.pack(fill="x", padx=10, pady=(0, 6))
-        self.chart_canvas = tk.Canvas(chart_frame, height=150, bg="#141414", highlightthickness=0)
+        self.chart_canvas = tk.Canvas(chart_frame, height=120, bg="#141414", highlightthickness=0)
         self.chart_canvas.pack(fill="both", expand=True)
         self.chart_canvas.bind("<Configure>", lambda _e: self._render_chart())
         self._chart_currency = "EUR"
@@ -485,7 +488,7 @@ class CurrencyWatcherUI:
 
         inner = ttk.Frame(cols)
         inner.pack(fill="both", expand=True)
-        self.alerts_list = tk.Listbox(inner, height=5)
+        self.alerts_list = tk.Listbox(inner, height=4)
         self.alerts_list.pack(side="left", fill="both", expand=True)
         scroll = ttk.Scrollbar(inner, orient="vertical", command=self.alerts_list.yview)
         self.alerts_list.configure(yscrollcommand=scroll.set)
@@ -505,15 +508,9 @@ class CurrencyWatcherUI:
         ttk.Button(
             actions, text="Eliminar", command=self._delete_alert, bootstyle="danger"
         ).pack(fill="x", pady=2)
-
-        # Subpanel de historial de notificaciones.
-        notif = ttk.LabelFrame(row, text="Historial de notificaciones", padding=4)
-        notif.pack(side="right", padx=8, fill="y")
-        self.notif_list = tk.Listbox(notif, height=5, width=42)
-        self.notif_list.pack(side="left", fill="both", expand=True)
-        nscroll = ttk.Scrollbar(notif, orient="vertical", command=self.notif_list.yview)
-        self.notif_list.configure(yscrollcommand=nscroll.set)
-        nscroll.pack(side="right", fill="y")
+        ttk.Button(
+            actions, text="Historial de notificaciones", command=self._show_history, bootstyle="secondary-outline"
+        ).pack(fill="x", pady=2)
 
     # ------------------------------------------------------------ status
 
@@ -566,9 +563,34 @@ class CurrencyWatcherUI:
         self.notification_log.append(text)
         if len(self.notification_log) > 50:
             self.notification_log = self.notification_log[-50:]
-        self.notif_list.delete(0, tk.END)
-        for item in self.notification_log:
-            self.notif_list.insert(tk.END, item)
+
+    def _show_history(self) -> None:
+        """Abre un pop-up con el historial de notificaciones emitidas."""
+        win = ttk.Toplevel(self.root)
+        win.title("Historial de notificaciones")
+        win.transient(self.root)
+        win.grab_set()
+        win.geometry("460x320")
+        pad = {"padx": 10, "pady": 6}
+
+        ttk.Label(win, text="Notificaciones emitidas", font=("", 10, "bold")).pack(**pad)
+
+        if not self.notification_log:
+            ttk.Label(win, text="Todavía no hay notificaciones.", bootstyle="secondary").pack(**pad)
+        else:
+            frame = ttk.Frame(win)
+            frame.pack(fill="both", expand=True, **pad)
+            lst = tk.Listbox(frame, height=12)
+            lst.pack(side="left", fill="both", expand=True)
+            scroll = ttk.Scrollbar(frame, orient="vertical", command=lst.yview)
+            lst.configure(yscrollcommand=scroll.set)
+            scroll.pack(side="right", fill="y")
+            for item in self.notification_log:
+                lst.insert(tk.END, item)
+
+        ttk.Button(
+            win, text="Cerrar", command=win.destroy, bootstyle="secondary", width=12,
+        ).pack(pady=12)
 
     def _export(self) -> None:
         """Exporta la configuración (y tasas guardadas) a JSON/CSV en el directorio actual."""
@@ -586,8 +608,6 @@ class CurrencyWatcherUI:
 
             csv_path = base_dir / f"rates_{ts}.csv"
             with open(csv_path, "w", encoding="utf-8", newline="") as fh:
-                import csv
-
                 writer = csv.writer(fh)
                 writer.writerow(["base", "currency", "rate", "ts"])
                 if self.history is not None:
@@ -1038,6 +1058,7 @@ class CurrencyWatcherUI:
 
     def _in_app_notification(self, title: str, message: str) -> None:
         """Fallback: muestra la notificación dentro de la aplicación si no hay notify-send."""
+        self._push_notification(f"{title}: {message}")
         self.root.after(0, lambda: self._set_message(f"{title}: {message}", "info"))
 
     def _save_config(self) -> None:
