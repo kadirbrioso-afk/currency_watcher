@@ -26,6 +26,7 @@ import aiohttp
 import ttkbootstrap as ttk
 
 from config import ConfigManager, SUPPORTED_CURRENCIES
+from history import HistoryStore
 from rates import fetch_rates_for_display
 from ui import CurrencyWatcherUI, RatesController
 
@@ -49,11 +50,13 @@ class AsyncWorker:
         get_base: Callable[[], str],
         get_interval: Callable[[], int],
         is_auto_enabled: Callable[[], bool],
+        history: HistoryStore | None = None,
     ) -> None:
         self.controller = controller
         self.get_base = get_base
         self.get_interval = get_interval
         self.is_auto_enabled = is_auto_enabled
+        self.history = history
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._main_task: asyncio.Task | None = None
@@ -136,6 +139,11 @@ class AsyncWorker:
         try:
             rates = await fetch_rates_for_display(base, self._session)
             stamp = datetime.now().isoformat(timespec="seconds")
+            if self.history is not None:
+                try:
+                    self.history.record(base, rates, ts=stamp)
+                except Exception:
+                    pass
             self.controller.results.put(
                 {"kind": "rates", "rates": rates, "base": base, "stamp": stamp}
             )
@@ -160,11 +168,15 @@ def main() -> None:
     if config.base_currency not in SUPPORTED_CURRENCIES:
         config.base_currency = "USD"
 
-    # Ventana ttkbootstrap con tema oscuro.
-    root = ttk.Window(themename="darkly")
+    # Ventana ttkbootstrap con el tema guardado.
+    root = ttk.Window(themename=config.theme)
 
     # Controlador de comunicación UI <-> worker.
     controller = RatesController()
+
+    # Almacén de historial SQLite (se rellena con cada actualización).
+    history = HistoryStore()
+    history.connect()
 
     # Worker asíncrono que delega la lectura de la configuración en callbacks.
     worker = AsyncWorker(
@@ -172,13 +184,14 @@ def main() -> None:
         get_base=lambda: config.base_currency,
         get_interval=lambda: int(config.refresh_interval),
         is_auto_enabled=lambda: bool(config.auto_refresh),
+        history=history,
     )
 
     # El botón de "Actualizar" llama al worker.
     controller.set_request_handler(worker.request_refresh)
 
     # Construimos la interfaz.
-    ui = CurrencyWatcherUI(root, config, config_manager, controller)
+    ui = CurrencyWatcherUI(root, config, config_manager, controller, history=history)
 
     # Arrancamos el bucle asyncio y hacemos una primera actualización.
     worker.start()

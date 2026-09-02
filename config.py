@@ -36,7 +36,44 @@ CONDITIONS: dict[str, dict[str, str]] = {
     "less_or_equal": {"label": "Precio menor o igual que (<=)"},
     "percent_up": {"label": "Subida porcentual mayor que (%)"},
     "percent_down": {"label": "Bajada porcentual mayor que (%)"},
+    "periodic": {"label": "Informe periódico (sin condición)"},
 }
+
+# Periodos disponibles para las alertas de informe periódico (en horas).
+PERIOD_OPTIONS: dict[int, str] = {
+    1: "Cada 1 hora",
+    12: "Cada 12 horas",
+    24: "Cada 24 horas",
+}
+
+# Condiciones de umbral (requieren un valor objetivo).
+THRESHOLD_CONDITIONS = {
+    "greater_than",
+    "less_than",
+    "greater_or_equal",
+    "less_or_equal",
+    "percent_up",
+    "percent_down",
+}
+
+# Condición de informe periódico (no requiere valor objetivo).
+PERIODIC_CONDITION = "periodic"
+
+# Temas disponibles para la interfaz (ttkbootstrap).
+THEMES: list[str] = [
+    "darkly",
+    "flatly",
+    "superhero",
+    "journal",
+    "litera",
+    "minty",
+    "pulse",
+    "sandstone",
+    "united",
+    "yeti",
+    "cyborg",
+    "vapor",
+]
 
 
 def _now_iso() -> str:
@@ -54,6 +91,8 @@ class Alert:
     enabled: bool = True
     notify_once: bool = False
     trigger_on_next_check: bool = False
+    period_hours: int = 1
+    last_fired_at: str | None = None
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = field(default_factory=_now_iso)
 
@@ -67,6 +106,8 @@ class Alert:
             enabled=bool(data.get("enabled", True)),
             notify_once=bool(data.get("notify_once", False)),
             trigger_on_next_check=bool(data.get("trigger_on_next_check", False)),
+            period_hours=int(data.get("period_hours", 1)),
+            last_fired_at=(data.get("last_fired_at") or None),
             id=str(data.get("id", str(uuid.uuid4()))),
             created_at=str(data.get("created_at", _now_iso())),
         )
@@ -83,6 +124,8 @@ class Config:
     base_currency: str = "USD"
     refresh_interval: int = 60
     auto_refresh: bool = True
+    theme: str = "darkly"
+    favorites: list[str] = field(default_factory=list)
     alerts: list[Alert] = field(default_factory=list)
 
     DEFAULT_INTERVALS: set[int] = field(
@@ -93,10 +136,16 @@ class Config:
     def from_dict(cls, data: dict[str, Any]) -> "Config":
         """Construye una Config desde un diccionario (JSON)."""
         alerts = [Alert.from_dict(a) for a in data.get("alerts", [])]
+        favorites = list(data.get("favorites", []))
+        theme = str(data.get("theme", "darkly"))
+        if theme not in THEMES:
+            theme = "darkly"
         return cls(
             base_currency=str(data.get("base_currency", "USD")),
             refresh_interval=int(data.get("refresh_interval", 60)),
             auto_refresh=bool(data.get("auto_refresh", True)),
+            theme=theme,
+            favorites=favorites,
             alerts=alerts,
         )
 
@@ -106,6 +155,8 @@ class Config:
             "base_currency": self.base_currency,
             "refresh_interval": self.refresh_interval,
             "auto_refresh": self.auto_refresh,
+            "theme": self.theme,
+            "favorites": self.favorites,
             "alerts": [a.to_dict() for a in self.alerts],
         }
 

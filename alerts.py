@@ -9,11 +9,26 @@ from __future__ import annotations
 
 from typing import Any
 
-from config import Alert, CONDITIONS, SUPPORTED_CURRENCIES
+from config import (
+    Alert,
+    CONDITIONS,
+    SUPPORTED_CURRENCIES,
+    PERIOD_OPTIONS,
+    PERIODIC_CONDITION,
+)
+
+
+def is_periodic(alert: Alert) -> bool:
+    """Indica si la alerta es de tipo informe periódico (sin condición)."""
+    return alert.condition == PERIODIC_CONDITION
 
 
 def describe_condition(alert: Alert) -> str:
     """Devuelve una descripción legible de la condición de una alerta."""
+    if is_periodic(alert):
+        label = PERIOD_OPTIONS.get(alert.period_hours, f"Cada {alert.period_hours} h")
+        symbol = SUPPORTED_CURRENCIES.get(alert.currency, alert.currency)
+        return f"{alert.currency} ({symbol}): informe periódico {label.lower()}"
     label = CONDITIONS[alert.condition]["label"] if alert.condition in CONDITIONS else alert.condition
     symbol = SUPPORTED_CURRENCIES.get(alert.currency, alert.currency)
     return f"{alert.currency} ({symbol}): {label} {alert.value:g}"
@@ -31,9 +46,14 @@ def evaluate(alert: Alert, current: float | None, previous: float | None) -> tup
     """Evalúa una alerta contra el precio actual (y el anterior si procede).
 
     Devuelve una tupla (se_cumple: bool, mensaje_descripcion: str).
+    Las alertas de informe periódico nunca se "disparan" aquí; su gestión de
+    tiempo se realiza en la interfaz (ver ui.py).
     """
     current = _to_float(current)
     if current is None:
+        return False, describe_condition(alert)
+
+    if is_periodic(alert):
         return False, describe_condition(alert)
 
     cond = alert.condition

@@ -1,6 +1,6 @@
 [project]
 name = "currency-watcher"
-version = "0.1.0"
+version = "1.0.0"
 description = "Monitor de tipos de cambio con notificaciones y alertas en Linux"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,4 +22,9 @@ package = true
 [dependency-groups]
 dev = [
     "pyinstaller>=6.22.2",
+    "pytest>=8.3",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
