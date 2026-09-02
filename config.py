@@ -28,6 +28,17 @@ SUPPORTED_CURRENCIES: dict[str, str] = {
     "RUB": "Rublo ruso",
 }
 
+# Símbolo monetario para cada moneda soportada (se muestra en la columna "Símbolo").
+CURRENCY_SYMBOLS: dict[str, str] = {
+    "EUR": "€",
+    "GBP": "£",
+    "USD": "$",
+    "JPY": "¥",
+    "CNY": "¥",
+    "PEN": "S/",
+    "RUB": "₽",
+}
+
 # Tipos de condición soportados por las alertas.
 CONDITIONS: dict[str, dict[str, str]] = {
     "greater_than": {"label": "Precio mayor que (>)"},

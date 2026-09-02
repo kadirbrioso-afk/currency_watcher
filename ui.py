@@ -34,6 +34,7 @@ from config import (
     THRESHOLD_CONDITIONS,
     THEMES,
     SUPPORTED_CURRENCIES,
+    CURRENCY_SYMBOLS,
     Alert,
     Config,
     ConfigManager,
@@ -434,9 +435,8 @@ class CurrencyWatcherUI:
             "status": 100,
         }
         for col_name, text in headings:
-            self.tree.heading(col_name, text=text)
-            anchor = "center" if col_name in ("fav", "status") else "w"
-            self.tree.column(col_name, width=widths[col_name], anchor=anchor)
+            self.tree.heading(col_name, text=text, anchor="center")
+            self.tree.column(col_name, width=widths[col_name], anchor="center")
 
         scroll = ttk.Scrollbar(cols_frame, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scroll.set)
@@ -631,7 +631,7 @@ class CurrencyWatcherUI:
         if column == "#1":
             item = self.tree.identify_row(event.y)
             if item:
-                code = self.tree.item(item, "values")[1]
+                code = self.tree.item(item, "values")[2]
                 if code in self.config.favorites:
                     self.config.favorites.remove(code)
                 else:
@@ -885,7 +885,7 @@ class CurrencyWatcherUI:
                 "end",
                 values=(
                     "★" if is_fav else "☆",
-                    code,
+                    CURRENCY_SYMBOLS.get(code, code),
                     code,
                     name,
                     price_display,
