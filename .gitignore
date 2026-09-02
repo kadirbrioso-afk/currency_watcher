@@ -3,9 +3,15 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
+
+# PyInstaller
 build/
 dist/
-*.egg
+currency-watcher.spec
+
+# Entorno de build genérico
+/tmp/
 
 # Datos de la aplicación
 config.json

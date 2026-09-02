@@ -5,7 +5,8 @@ el precio de varias monedas respecto a una moneda base elegida por el usuario,
 y que permite programar **alertas/notificaciones** cuando una moneda sube, baja,
 alcanza un valor concreto o varía un porcentaje determinado.
 
-Construida con **Python 3.10+**, **ttkbootstrap**, **asyncio** y **aiohttp**.
+Construida con **Python 3.10+** (desarrollada y probada en **3.14.7**),
+**ttkbootstrap**, **asyncio** y **aiohttp**.
 
 ## Monedas soportadas
 
@@ -29,8 +30,9 @@ cd currency_watcher
 uv sync
 ```
 
-Esto crea un `.venv` con Python 3.10+ (`.python-version`) e instala las
-dependencias declaradas en `pyproject.toml`, generando `uv.lock`.
+Esto crea un `.venv` con la versión de Python indicada en `.python-version`
+(actualmente **3.14.7**) e instala las dependencias declaradas en
+`pyproject.toml`, generando `uv.lock`.
 
 ### Dependencias del sistema para notificaciones
 
@@ -91,9 +93,46 @@ currency_watcher/
 ├── notifier.py      # Notificaciones de escritorio (notify-send / plyer / fallback).
 ├── sounds.py        # Reproducción de sonido de alerta (canberra / paplay / aplay / ffplay).
 ├── config.py        # Configuración persistente y reglas de alerta (JSON).
+├── build.sh         # Automatiza el empaquetado con PyInstaller (--onedir).
 ├── pyproject.toml   # Metadatos y dependencias (gestión con uv).
 ├── uv.lock          # Resolución de dependencias bloqueada.
 └── README.md
+```
+
+## Empaquetado (build con PyInstaller)
+
+El proyecto incluye `build.sh`, que empaqueta la aplicación en un directorio
+distribuible con PyInstaller en modo `--onedir` (carpeta con el binario y sus
+dependencias) y genera además un tarball. Solo hay que ejecutarlo:
+
+```bash
+./build.sh
+```
+
+Opcionalmente se puede pasar la versión para el nombre del tarball:
+
+```bash
+./build.sh 1.0.0
+```
+
+Resultados:
+- `dist/currency-watcher/` → la app empaquetada (`currency-watcher` es el ejecutable).
+- `dist/currency-watcher-<version>-linux-x64.tar.gz` → tarball distribuir.
+
+> **Nota técnica**: el script usa preferentemente el **Python del sistema**,
+> no el gestionado por uv, porque algunos Pythons gestionados traen un tkinter
+> que no enlaza correctamente con el Tcl/Tk del sistema (evitando el error
+> `undefined symbol: TclBN_mp_to_ubin`). Verifica también que `tkinter` funcione
+> y recopila los assets de `ttkbootstrap` y `PIL`.
+
+Si el sistema no tiene `python3-tkinter`, instálalo:
+- **Fedora**: `sudo dnf install python3-tkinter`
+- **Debian/Ubuntu**: `sudo apt install python3-tk`
+
+Para ejecutar la app empaquetada:
+
+```bash
+dist/currency-watcher/currency-watcher
 ```
 
 ## Funcionalidades
