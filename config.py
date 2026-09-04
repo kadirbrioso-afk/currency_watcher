@@ -18,7 +18,9 @@ from typing import Any
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 
 # Monedas soportadas por la aplicación, con su código y nombre en español.
+# Incluye monedas fiat y criptomonedas.
 SUPPORTED_CURRENCIES: dict[str, str] = {
+    # Fiat
     "EUR": "Euro",
     "GBP": "Libra esterlina",
     "USD": "Dólar estadounidense",
@@ -26,6 +28,16 @@ SUPPORTED_CURRENCIES: dict[str, str] = {
     "CNY": "Yuan chino",
     "PEN": "Sol peruano",
     "RUB": "Rublo ruso",
+    # Criptomonedas
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "SOL": "Solana",
+    "TRX": "Tron",
+    "USDT": "Tether",
+    "XRP": "Ripple",
+    "DOGE": "Dogecoin",
+    "SUI": "Sui",
+    "LINK": "Chainlink",
 }
 
 # Símbolo monetario para cada moneda soportada (se muestra en la columna "Símbolo").
@@ -37,6 +49,28 @@ CURRENCY_SYMBOLS: dict[str, str] = {
     "CNY": "¥",
     "PEN": "S/",
     "RUB": "₽",
+    "BTC": "₿",
+    "ETH": "Ξ",
+    "SOL": "◎",
+    "TRX": "TRX",
+    "USDT": "₮",
+    "XRP": "XRP",
+    "DOGE": "Ð",
+    "SUI": "SUI",
+    "LINK": "LINK",
+}
+
+# Mapeo de código de moneda -> ID de CoinGecko (solo criptomonedas).
+CRYPTO_IDS: dict[str, str] = {
+    "BTC": "bitcoin",
+    "ETH": "ethereum",
+    "SOL": "solana",
+    "TRX": "tron",
+    "USDT": "tether",
+    "XRP": "ripple",
+    "DOGE": "dogecoin",
+    "SUI": "sui",
+    "LINK": "chainlink",
 }
 
 # Tipos de condición soportados por las alertas.
