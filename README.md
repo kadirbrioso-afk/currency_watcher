@@ -6,7 +6,7 @@ y que permite programar **alertas/notificaciones** cuando una moneda sube, baja,
 alcanza un valor concreto o varía un porcentaje determinado.
 
 Construida con **Python 3.10+** (desarrollada y probada en **3.14.7**),
-**ttkbootstrap**, **asyncio** y **aiohttp**.
+**pyside6**, **asyncio** y **aiohttp**.
 
 ## Monedas soportadas
 
@@ -229,7 +229,6 @@ actualización automática en el siguiente ciclo (sin cerrarse).
 ## Posibles mejoras futuras
 
 - Soporte de más monedas y de cifras de la API configurable.
-- Gráficas históricas de evolución de precios.
 - Histórico de notificaciones disparadas en la propia app.
 - Sonido configurable por el usuario (activar/desactivar, elegir sonido).
 - Notificaciones mediante `dbus-next` para un control más fino.
