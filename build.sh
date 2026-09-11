@@ -3,18 +3,20 @@
 # build.sh — Empaqueta Currency Watcher con PyInstaller en modo --onedir.
 #
 # Uso:
-#   ./build.sh
+#   ./build.sh [VERSION]
 #
-# Qué hace:
-#   1. Detecta un intérprete de Python compatible con tkinter (importante:
-#      el tkinter debe enlazar con el Tcl/Tk del sistema).
-#   2. Crea (o reutiliza) un entorno virtual de build aislado.
-#   3. Instala en él las dependencias de ejecución y PyInstaller.
-#   4. Lanza PyInstaller con --onedir --windowed, recopilando los datos de
-#      ttkbootstrap y PIL (assets/iconos) y el módulo oculto de PIL para tkinter.
-#   5. Deja el resultado en dist/currency-watcher/ y genera un tarball.
+# Estrategia:
+#   Rápida: usa un Python que YA tenga aiohttp, pyside6, plyer y PyInstaller
+#   (p. ej. /usr/bin/python3 con pip --user), sin descargar nada. Reduce el
+#   build a ~30 s.
+#   Fallback: si no existe, crea un venv de build en /tmp y hace pip install
+#   (lento, primero descarga PySide6).
 #
-# Reproducible para versiones futuras: solo hay que ejecutarlo de nuevo.
+# Final:
+#   - Ejecuta PyInstaller con currency-watcher.spec (excluye módulos Qt
+#     innecesarios y aplica strip para reducir tamaño).
+#   - Purga plugins/librerías Qt que la app no usa (~80 MB menos).
+#   - Deja el resultado en dist/currency-watcher/ y genera un tarball.
 # =============================================================================
 set -euo pipefail
 
@@ -28,75 +30,40 @@ VERSION="${1:-0.1.0}"
 echo "[build] Empaquetando ${APP_NAME} v${VERSION} (PyInstaller --onedir)..."
 
 # ---------------------------------------------------------------------------
-# 1. Elegir un intérprete de Python compatible con tkinter.
+# 1. Elegir un Python que ya tenga todas las dependencias.
 # ---------------------------------------------------------------------------
-# AVISO: algunos Pythons gestionados por herramientas de gestión de entornos
-# (p. ej. el proporcionado por uv) pueden traer un tkinter que no enlaza
-# correctamente con el Tcl/Tk del sistema. Para evitar el error
-# "undefined symbol: TclBN_mp_to_ubin", usamos preferentemente el Python del
-# sistema, verificando que importa tkinter sin errores.
 PYTHON_BIN=""
-
-# Intérpretes candidatos, por orden de preferencia.
-for cand in /usr/bin/python3 /usr/local/bin/python3; do
-    if [[ -x "$cand" ]] && "$cand" -c "import tkinter" 2>/dev/null; then
+for cand in /usr/bin/python3 /usr/local/bin/python3 "$BUILD_VENV_DIR/bin/python"; do
+    if [[ -x "$cand" ]] && \
+       "$cand" -c "import aiohttp, plyer, PySide6, PyInstaller" 2>/dev/null; then
         PYTHON_BIN="$cand"
         break
     fi
 done
 
-# Si ninguno del sistema sirve, caemos en el python del proyecto (con venv).
-if [[ -z "$PYTHON_BIN" && -x "./.venv/bin/python" ]]; then
-    if "./.venv/bin/python" -c "import tkinter" 2>/dev/null; then
-        PYTHON_BIN="./.venv/bin/python"
-    fi
-fi
-
+# Fallback: crear un venv de build e instalar las dependencias (lento).
 if [[ -z "$PYTHON_BIN" ]]; then
-    echo "[build] ERROR: no se encontró un Python con tkinter funcional." >&2
-    echo "[build] Instala tkinter de tu sistema, p. ej.:" >&2
-    echo "[build]   dnf install python3-tkinter   (Fedora)" >&2
-    echo "[build]   apt install python3-tk        (Debian/Ubuntu)" >&2
-    exit 1
+    echo "[build] Sin Python con deps completas; creando venv e instalando (lento)..."
+    BASE=""
+    for c in /usr/bin/python3 /usr/local/bin/python3; do
+        [[ -x "$c" ]] && BASE="$c" && break
+    done
+    [[ -z "$BASE" ]] && { echo "[build] ERROR: no hay python3." >&2; exit 1; }
+    if [[ ! -x "$BUILD_VENV_DIR/bin/python" ]]; then
+        "$BASE" -m venv "$BUILD_VENV_DIR"
+    fi
+    "$BUILD_VENV_DIR/bin/pip" install --quiet aiohttp pyside6 plyer pyinstaller
+    PYTHON_BIN="$BUILD_VENV_DIR/bin/python"
 fi
 
-echo "[build] Intérprete de build: $PYTHON_BIN"
-"$PYTHON_BIN" --version
+echo "[build] Python de build: $("$PYTHON_BIN" --version)"
 
 # ---------------------------------------------------------------------------
-# 2. Entorno virtual de build.
-# ---------------------------------------------------------------------------
-if [[ ! -x "$BUILD_VENV_DIR/bin/python" ]]; then
-    echo "[build] Creando entorno virtual de build en $BUILD_VENV_DIR"
-    "$PYTHON_BIN" -m venv "$BUILD_VENV_DIR"
-fi
-
-BUILD_PY="$BUILD_VENV_DIR/bin/python"
-# Reinstalamos si cambia el intérprete base.
-"$BUILD_PY" -c "import sys; sys.exit(0) if sys.executable else None" 2>/dev/null || true
-
-# ---------------------------------------------------------------------------
-# 3. Dependencias.
-# ---------------------------------------------------------------------------
-echo "[build] Instalando dependencias de build (aiohttp, ttkbootstrap, plyer, pyinstaller)..."
-"$BUILD_VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$BUILD_VENV_DIR/bin/pip" install --quiet aiohttp ttkbootstrap plyer pyinstaller
-
-# ---------------------------------------------------------------------------
-# 4. Limpieza y build con PyInstaller.
+# 2. Limpieza y build con PyInstaller (usa el spec con excludes + strip).
 # ---------------------------------------------------------------------------
 rm -rf build dist
-echo "[build] Ejecutando PyInstaller --onedir --windowed..."
-"$BUILD_VENV_DIR/bin/pyinstaller" \
-    --noconfirm \
-    --clean \
-    --windowed \
-    --name "$APP_NAME" \
-    --onedir \
-    --collect-data ttkbootstrap \
-    --collect-all PIL \
-    --hidden-import PIL._tkinter_finder \
-    main.py
+echo "[build] Ejecutando PyInstaller (currency-watcher.spec)..."
+"$PYTHON_BIN" -m PyInstaller --noconfirm --clean currency-watcher.spec
 
 DIST_DIR="dist/${APP_NAME}"
 if [[ ! -x "$DIST_DIR/${APP_NAME}" ]]; then
@@ -105,7 +72,26 @@ if [[ ! -x "$DIST_DIR/${APP_NAME}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Comprobación rápida y empaquetado en tarball.
+# 3. Purga de plugins y librerías Qt que la app no usa (reduce ~80 MB).
+#    Se eliminan plugins cuya carga arrastra libQt6Pdf, QtQuick/QtQml y KDE
+#    (Breeze); el resto de Qt sigue funcionando con fallbacks estándar.
+# ---------------------------------------------------------------------------
+echo "[build] Purgando plugins/librerías Qt innecesarios..."
+QT_LIB="$DIST_DIR/_internal/PySide6/Qt/lib"
+rm -f \
+    "$DIST_DIR/_internal/PySide6/Qt/plugins/imageformats/libqpdf.so" \
+    "$DIST_DIR/_internal/PySide6/Qt/plugins/imageformats/kimg_"*.so \
+    "$DIST_DIR/_internal/PySide6/Qt/plugins/platformthemes/KDEPlasmaPlatformTheme6.so" \
+    "$DIST_DIR/_internal/PySide6/Qt/plugins/styles/breeze6.so"
+for lib in libQt6Pdf libQt6Quick libQt6QuickControls2 libQt6QuickTemplates2 \
+           libQt6QuickLayouts libQt6Qml libQt6QmlMeta libQt6QmlModels \
+           libQt6QmlWorkerScript libKF6BreezeIcons libKF6IconThemes \
+           libKF6Notifications libKF6ConfigCore libKF6WindowSystem libKF6I18n; do
+    rm -f "$DIST_DIR/_internal/${lib}".so.* "$QT_LIB/${lib}".so.* 2>/dev/null || true
+done
+
+# ---------------------------------------------------------------------------
+# 4. Comprobación rápida y empaquetado en tarball.
 # ---------------------------------------------------------------------------
 echo "[build] Build OK. Resultado en $DIST_DIR"
 ls -la "$DIST_DIR"
