@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS samples (
 CREATE INDEX IF NOT EXISTS idx_samples_pair_ts ON samples(base, currency, ts);
 """
 
-_DEFAULT_DAYS = 30
+_RETENTION_DAYS = 90
 
 
 class HistoryStore:
@@ -40,15 +40,36 @@ class HistoryStore:
         self._conn: sqlite3.Connection | None = None
 
     def connect(self) -> None:
-        """Abre la conexión (creando el esquema la primera vez)."""
+        """Abre la conexión (creando el esquema la primera vez).
+
+        - `check_same_thread=False` permite que el worker (QThread) y el
+          hilo principal compartan la misma conexión SQLite.
+        - `journal_mode=WAL` + `busy_timeout=5000` evitan errores de
+          "database is locked" cuando UI y worker acceden en paralelo.
+        - Se eliminan registros antiguos (> 90 días) para mantener el tamaño.
+        """
         if self._conn is None:
-            self._conn = sqlite3.connect(str(self.path))
+            self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
             self._conn.executescript(_SCHEMA)
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._prune()
 
     def close(self) -> None:
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+    def _prune(self, days: int = _RETENTION_DAYS) -> None:
+        """Borra muestras más antiguas que `days` días (mismo esquema de ts local)."""
+        if self._conn is None:
+            return
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+        try:
+            with self._conn:
+                self._conn.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+        except sqlite3.Error:
+            pass
 
     def record(self, base: str, rates: dict[str, float], ts: str | None = None) -> bool:
         """Guarda una fila de muestras. Devuelve True si hubo éxito."""

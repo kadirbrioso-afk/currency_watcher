@@ -7,14 +7,14 @@ requires-python = ">=3.10"
 dependencies = [
     "aiohttp>=3.14.3",
     "plyer>=2.1.0",
-    "ttkbootstrap>=2.2.2",
+    "pyside6>=6.5",
 ]
 
 [project.scripts]
 currency-watcher = "main:main"
 
 [tool.setuptools]
-py-modules = ["main", "ui", "rates", "alerts", "notifier", "config", "sounds"]
+py-modules = ["main", "ui", "rates", "alerts", "notifier", "config", "sounds", "history"]
 
 [tool.uv]
 package = true

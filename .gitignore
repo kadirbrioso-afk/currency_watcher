@@ -16,3 +16,6 @@ currency-watcher.spec
 # Datos de la aplicación
 config.json
 history.db
+history.db-wal
+history.db-shm
+rates_*.csv

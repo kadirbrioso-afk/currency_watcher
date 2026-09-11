@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 
-from config import CRYPTO_IDS
+from config import CRYPTO_IDS, FIAT_CURRENCIES
 
 log = logging.getLogger(__name__)
 
@@ -34,11 +34,12 @@ RATE_PROVIDERS: list[dict[str, Any]] = [
     },
 ]
 
-# Monedas fiat que la app quiere mostrar.
-WATCHED_FIAT = ["EUR", "GBP", "USD", "JPY", "CNY", "PEN", "RUB"]
-
 REQUEST_TIMEOUT_SECONDS = 10.0
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
+
+# Últimos precios crypto conocidos, para no perderlos si CoinGecko falla
+# (p. ej. por rate-limit 429).
+_crypto_cache: dict[str, float] = {}
 
 
 async def _fetch_rates_from(provider: dict[str, Any], base: str, session: aiohttp.ClientSession) -> dict[str, float]:
@@ -93,6 +94,8 @@ async def _fetch_crypto_usd(session: aiohttp.ClientSession) -> dict[str, float]:
                     continue
                 if price > 0:
                     result[code] = price
+        if result:
+            _crypto_cache.update(result)
         return result
 
 
@@ -137,7 +140,7 @@ async def fetch_rates_for_display(
         fiat_coro = fetch_rates(base, session)
         crypto_coro = _fetch_crypto_usd(session)
         results = await asyncio.gather(fiat_coro, crypto_coro, return_exceptions=True)
-        fiat_result, crypto_usd = results[0], results[1]
+        fiat_result, crypto_result = results[0], results[1]
 
         # Manejo de errores: si fiat falla, usamos lo que tengamos.
         fiat_rates: dict[str, float] = {}
@@ -146,15 +149,17 @@ async def fetch_rates_for_display(
         else:
             log.warning("Error obteniendo tasas fiat: %s", fiat_result)
 
-        if isinstance(crypto_usd, Exception):
-            log.warning("Error obteniendo precios crypto: %s", crypto_usd)
-            crypto_usd = {}
+        if isinstance(crypto_result, Exception):
+            log.warning("CoinGecko falló (uso caché): %s", crypto_result)
+            crypto_usd = dict(_crypto_cache)
+        else:
+            crypto_usd = crypto_result
 
         # Construimos el resultado.
         result: dict[str, float] = {base: 1.0}
 
         # Tasas fiat.
-        for code in WATCHED_FIAT:
+        for code in FIAT_CURRENCIES:
             if code != base and code in fiat_rates:
                 result[code] = fiat_rates[code]
 

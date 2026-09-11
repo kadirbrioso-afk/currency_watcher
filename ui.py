@@ -1,38 +1,71 @@
 """
-Interfaz gráfica con ttkbootstrap.
+Interfaz gráfica con PySide6.
 
-Este módulo contiene toda la parte visual de ttkbootstrap/tkinter, así como la
-integración con el bucle de eventos de asyncio. La lógica de negocio (tasas,
-alertas, configuración) se delega en los otros módulos.
-
-Para combinar tkinter con asyncio se usa la siguiente estrategia:
-  - El bucle de asyncio se ejecuta en un hilo en segundo plano (ver main.py).
-  - La interfaz usa `root.after(...)` para consultar periódicamente una cola
-    segura (`queue.Queue`) en la que las corrutinas depositan resultados.
-  - Las corrutinas envían datos a la interfaz a través de esa cola en lugar de
-    tocar directamente los widgets (acceso seguro entre hilos).
+Este módulo contiene toda la parte visual usando PySide6/Qt, así como la
+integración con el bucle de eventos de asyncio mediante QThread.
+La lógica de negocio (tasas, alertas, configuración) se delega en los
+otros módulos.
 """
 
 from __future__ import annotations
 
 import csv
 import json
-import queue
-import threading
-import tkinter as tk
 from datetime import datetime, timezone
-from tkinter import ttk
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any
 
-import ttkbootstrap as ttk
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QObject,
+    QPointF,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QMainWindow,
+    QMenu,
+    QPushButton,
+    QSplitter,
+    QSystemTrayIcon,
+    QTableView,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
 
 from alerts import describe_condition, evaluate, is_periodic
 from config import (
     CONDITIONS,
     PERIOD_OPTIONS,
     PERIODIC_CONDITION,
-    THRESHOLD_CONDITIONS,
     THEMES,
+    THRESHOLD_CONDITIONS,
     SUPPORTED_CURRENCIES,
     CURRENCY_SYMBOLS,
     Alert,
@@ -42,183 +75,667 @@ from config import (
 )
 from notifier import notify
 
+HEADERS = ["Fav", "Símbolo", "Código", "Moneda", "Precio", "Hora", "Cambio", "Variación", "Estado"]
+COL_KEYS = ["fav", "symbol", "code", "name", "price", "time", "change", "change_pct", "status"]
+COL_WIDTHS = [40, 44, 72, 170, 120, 100, 90, 90, 90]
 
-class RatesController:
-    """Puente entre la interfaz y el worker asíncrono.
+COLOR_UP = "#2ecc71"
+COLOR_DOWN = "#e74c3c"
+COLOR_FAV = "#f39c12"
+COLOR_TEXT = "#e0e0e0"
+COLOR_BG = "#1a1a2e"
+COLOR_SURFACE = "#16213e"
+COLOR_SURFACE_ALT = "#1a2446"
+COLOR_BORDER = "#2c3e50"
 
-    Expone `request()` para pedir una actualización sin bloquear, y la cola
-    `results` que la interfaz consume periódicamente para refrescar los widgets.
+
+def _shade(hex_color: str, factor: float) -> str:
+    """Devuelve una variante más clara (factor>1) u oscura (factor<1) del color."""
+    c = QColor(hex_color)
+    ret = QColor(
+        min(255, int(c.red() * factor)),
+        min(255, int(c.green() * factor)),
+        min(255, int(c.blue() * factor)),
+    )
+    return ret.name()
+
+
+def build_qss(theme: dict[str, str]) -> str:
+    """Construye una hoja de estilo QSS completa a partir de un diccionario de colores."""
+    bg = theme["bg"]
+    fg = theme["fg"]
+    surface = theme["surface"]
+    accent = theme["accent"]
+    accent_fg = theme["accent_fg"]
+    border = theme["border"]
+    success = theme["success"]
+    danger = theme["danger"]
+    warning = theme["warning"]
+
+    return f"""
+    QMainWindow, QDialog {{
+        background-color: {bg};
+        color: {fg};
+    }}
+    QWidget {{
+        background-color: {bg};
+        color: {fg};
+        font-size: 13px;
+    }}
+    QGroupBox {{
+        border: 1px solid {border};
+        border-radius: 6px;
+        margin-top: 12px;
+        padding: 12px 8px 8px 8px;
+        font-weight: bold;
+        color: {fg};
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 6px;
+    }}
+    QToolBar {{
+        background-color: {surface};
+        border-bottom: 1px solid {border};
+        spacing: 8px;
+        padding: 4px;
+    }}
+    QToolBar QComboBox, QToolBar QPushButton {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+        border-radius: 4px;
+        padding: 4px 10px;
+        min-height: 24px;
+    }}
+    QToolBar QComboBox:hover, QToolBar QPushButton:hover {{
+        border-color: {accent};
+    }}
+    QToolBar QLabel {{
+        color: {fg};
+    }}
+    QComboBox {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+        border-radius: 4px;
+        padding: 4px 8px;
+        min-height: 24px;
+    }}
+    QComboBox::drop-down {{
+        border: none;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+        selection-background-color: {accent};
+        selection-color: {accent_fg};
+    }}
+    QLineEdit {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+        border-radius: 4px;
+        padding: 4px 8px;
+        min-height: 24px;
+    }}
+    QLineEdit:focus {{
+        border-color: {accent};
+    }}
+    QPushButton {{
+        background-color: {accent};
+        color: {accent_fg};
+        border: none;
+        border-radius: 4px;
+        padding: 6px 14px;
+        min-height: 24px;
+        font-weight: bold;
+    }}
+    QPushButton:hover {{
+        opacity: 0.9;
+    }}
+    QPushButton:pressed {{
+        padding-top: 8px;
+    }}
+    QPushButton[cssClass="success"] {{
+        background-color: {success};
+    }}
+    QPushButton[cssClass="danger"] {{
+        background-color: {danger};
+    }}
+    QPushButton[cssClass="warning"] {{
+        background-color: {warning};
+        color: #000;
+    }}
+    QPushButton[cssClass="outline"] {{
+        background-color: transparent;
+        border: 1px solid {border};
+        color: {fg};
+    }}
+    QPushButton[cssClass="outline"]:hover {{
+        border-color: {accent};
+    }}
+    QTableView {{
+        background-color: {surface};
+        alternate-background-color: {bg};
+        color: {fg};
+        border: 1px solid {border};
+        border-radius: 4px;
+        gridline-color: {border};
+        selection-background-color: {accent};
+        selection-color: {accent_fg};
+        font-size: 13px;
+    }}
+    QTableView::item {{
+        padding: 4px 6px;
+    }}
+    QHeaderView::section {{
+        background-color: {bg};
+        color: {fg};
+        border: 1px solid {border};
+        padding: 6px 8px;
+        font-weight: bold;
+    }}
+    QStatusBar {{
+        background-color: {surface};
+        border-top: 1px solid {border};
+        color: {fg};
+    }}
+    QListWidget {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+        border-radius: 4px;
+        font-size: 12px;
+    }}
+    QListWidget::item {{
+        padding: 4px 8px;
+    }}
+    QListWidget::item:selected {{
+        background-color: {accent};
+        color: {accent_fg};
+    }}
+    QCheckBox {{
+        color: {fg};
+        spacing: 8px;
+    }}
+    QCheckBox::indicator {{
+        width: 16px;
+        height: 16px;
+    }}
+    QSplitter::handle {{
+        background-color: {border};
+    }}
+    QSplitter::handle:horizontal {{
+        width: 3px;
+    }}
+    QSplitter::handle:vertical {{
+        height: 3px;
+    }}
+    QScrollBar:vertical {{
+        background-color: {bg};
+        width: 10px;
+        border: none;
+    }}
+    QScrollBar::handle:vertical {{
+        background-color: {border};
+        border-radius: 5px;
+        min-height: 20px;
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0px;
+    }}
+    QMenu {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+    }}
+    QMenu::item:selected {{
+        background-color: {accent};
+        color: {accent_fg};
+    }}
+    QToolTip {{
+        background-color: {surface};
+        color: {fg};
+        border: 1px solid {border};
+        padding: 4px;
+    }}
     """
 
-    def __init__(self) -> None:
-        self.results: "queue.Queue[dict[str, Any]]" = queue.Queue()
-        self._request_fn: Callable[[], None] | None = None
 
-    def set_request_handler(self, handler: Callable[[], None]) -> None:
-        """Conecta el handler que dispara la petición asíncrona real."""
-        self._request_fn = handler
+# ──────────────────────────────────────────────────────────── Worker Thread
+# -----------------------------------------------------------------------
 
-    def request(self) -> None:
-        """Pide una actualización (no bloqueante)."""
-        if self._request_fn is not None:
-            try:
-                self._request_fn()
-            except Exception:
-                pass
+class _WorkerSignals(QObject):
+    """Señales que el worker emite hacia la UI (seguras entre hilos)."""
+    rates_ready = Signal(dict)
+    error = Signal(str)
 
 
-class AlertDialog:
+class _WorkerThread(QThread):
+    """Hilo que ejecuta peticiones async de tasas."""
+
+    def __init__(self, get_base, history, parent=None):
+        super().__init__(parent)
+        self._get_base = get_base
+        self._history = history
+        self.signals = _WorkerSignals()
+        self._stop = False
+        self._loop = None
+
+    def request_refresh(self):
+        if self._loop is not None:
+            import asyncio
+            asyncio.run_coroutine_threadsafe(self._do_refresh(), self._loop)
+
+    def stop(self):
+        """Detiene el hilo de forma segura (seguro de llamar más de una vez)."""
+        self._stop = True
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        self.wait(2500)
+
+    async def _do_refresh(self):
+        from rates import fetch_rates_for_display
+        base = self._get_base()
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                rates = await fetch_rates_for_display(base, session)
+            stamp = datetime.now().isoformat(timespec="seconds")
+            if self._history is not None:
+                try:
+                    self._history.record(base, rates, ts=stamp)
+                except Exception:
+                    pass
+            self.signals.rates_ready.emit({"rates": rates, "base": base, "stamp": stamp})
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+
+    def run(self):
+        import asyncio
+
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            if self._stop:
+                return
+            self._loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            self._loop.close()
+            self._loop = None
+
+
+# ──────────────────────────────────────────────────────── Table Model (MVC)
+# ---------------------------------------------------------------------------
+
+class RateTableModel(QAbstractTableModel):
+    """Modelo de datos para la tabla de precios (MVC)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._data: list[list[str]] = []
+        self._colors: list[str] = []
+        self._fav_colors: list[str] = []
+
+    def rowCount(self, parent=QModelIndex()):
+        return len(self._data)
+
+    def columnCount(self, parent=QModelIndex()):
+        return len(COL_KEYS)
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid():
+            return None
+        row, col = index.row(), index.column()
+        if row >= len(self._data):
+            return None
+        val = self._data[row][col]
+        if role == Qt.DisplayRole or role == Qt.EditRole:
+            return val
+        if role == Qt.TextAlignmentRole:
+            return Qt.AlignCenter
+        if role == Qt.ForegroundRole:
+            if col == 0 and self._fav_colors[row]:
+                return QColor(self._fav_colors[row])
+            if col in (4, 6, 7) and self._colors[row]:
+                return QColor(self._colors[row])
+            return QColor(COLOR_TEXT)
+        if role == Qt.BackgroundRole:
+            return QColor(COLOR_SURFACE_ALT) if row % 2 else QColor(COLOR_SURFACE)
+        return None
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+            return HEADERS[section]
+        return None
+
+    def update_data(self, rows: list[list[str]], colors: list[str], fav_colors: list[str]):
+        """Actualiza el modelo con nuevos datos (actualización incremental)."""
+        self.beginResetModel()
+        self._data = rows
+        self._colors = colors
+        self._fav_colors = fav_colors
+        self.endResetModel()
+
+    def get_code(self, row: int) -> str:
+        """Devuelve el código de moneda de la fila indicada."""
+        if 0 <= row < len(self._data):
+            return self._data[row][2]  # code column
+        return ""
+
+
+# ──────────────────────────────────────────────────── Chart Widget (QPainter)
+# ---------------------------------------------------------------------------
+
+class ChartWidget(QWidget):
+    """Widget que dibuja el gráfico de evolución histórica con QPainter."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(200)
+        self._series: list[dict[str, Any]] = []
+        self._currency = "EUR"
+        self._currency_name = "Euro"
+        self._range_label = "24h"
+        self._hover_index: int | None = None
+        self.setMouseTracking(True)
+
+    def set_data(self, series: list[dict[str, Any]], currency: str, range_label: str):
+        self._series = series
+        self._currency = currency
+        self._currency_name = SUPPORTED_CURRENCIES.get(currency, currency)
+        self._range_label = range_label
+        self._hover_index = None
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Fondo
+        painter.fillRect(0, 0, w, h, QColor(COLOR_BG))
+
+        if not self._series:
+            painter.setPen(QColor("#95a5a6"))
+            painter.setFont(QFont("", 10))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Sin historial suficiente aún")
+            painter.end()
+            return
+
+        rates = [s["rate"] for s in self._series]
+        mn, mx = min(rates), max(rates)
+        span = mx - mn or 1.0
+        pad = 14
+        margin_bottom = 36
+        margin_top = 18
+        plot_h = h - margin_bottom - margin_top
+        plot_w = w - 2 * pad
+
+        def sx(i):
+            if len(rates) <= 1:
+                return pad + 1
+            return pad + (i / (len(rates) - 1)) * plot_w
+
+        def sy(r):
+            ratio = (r - mn) / span
+            return margin_top + (1.0 - ratio) * plot_h
+
+        # Área sombreada
+        path = QPainterPath()
+        path.moveTo(sx(0), margin_top + plot_h)
+        for i, r in enumerate(rates):
+            path.lineTo(sx(i), sy(r))
+        path.lineTo(sx(len(rates) - 1), margin_top + plot_h)
+        path.closeSubpath()
+        brush = QBrush(QColor(46, 204, 113, 60))
+        painter.setBrush(brush)
+        painter.setPen(Qt.NoPen)
+        painter.drawPath(path)
+
+        # Línea de precios
+        pen = QPen(QColor(COLOR_UP), 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        polyline = [QPointF(sx(i), sy(r)) for i, r in enumerate(rates)]
+        painter.drawPolyline(polyline)
+
+        # Hover tooltip
+        if self._hover_index is not None and 0 <= self._hover_index < len(rates):
+            idx = self._hover_index
+            x, y = sx(idx), sy(rates[idx])
+            painter.setPen(QPen(QColor("#fff"), 1))
+            painter.setBrush(QBrush(QColor("#fff")))
+            painter.drawEllipse(QPointF(x, y), 4, 4)
+            tooltip = f"{rates[idx]:.6g}"
+            painter.setFont(QFont("", 9))
+            painter.setPen(QColor("#fff"))
+            painter.drawText(int(x + 8), int(y - 6), tooltip)
+
+        # Línea base
+        painter.setPen(QPen(QColor("#555"), 1))
+        painter.drawLine(pad, margin_top + plot_h, w - pad, margin_top + plot_h)
+
+        # Etiquetas min/max
+        painter.setFont(QFont("", 8))
+        painter.setPen(QColor("#95a5a6"))
+        painter.drawText(pad + 4, margin_top + plot_h - 4, f"min {mn:.6g}")
+        painter.drawText(
+            QRectF(w - pad - 4 - 150, margin_top + 8, 150, 20),
+            Qt.AlignRight,
+            f"max {mx:.6g}",
+        )
+
+        # Título de moneda
+        painter.setFont(QFont("", 9, QFont.Bold))
+        painter.setPen(QColor(COLOR_FAV))
+        painter.drawText(pad + 4, margin_top, f"{self._currency} ({self._currency_name})")
+
+        # Rango
+        painter.setFont(QFont("", 8))
+        painter.setPen(QColor("#95a5a6"))
+        painter.drawText(
+            QRectF(w - pad - 4 - 150, margin_top + plot_h - 24, 150, 20),
+            Qt.AlignRight,
+            f"último {self._range_label}",
+        )
+
+        # Eje temporal: primera, media y última marca de la ventana mostrada
+        n = len(rates)
+        axis = sorted({0, n // 2, n - 1})
+        painter.setFont(QFont("", 8))
+        painter.setPen(QColor("#95a5a6"))
+        anchors = {
+            0: Qt.AlignLeft,
+            n // 2: Qt.AlignHCenter,
+            n - 1: Qt.AlignRight,
+        }
+        for idx in axis:
+            wdt = 80
+            if anchors[idx] == Qt.AlignLeft:
+                x = sx(idx)
+            elif anchors[idx] == Qt.AlignRight:
+                x = sx(idx) - wdt
+            else:
+                x = sx(idx) - wdt / 2
+            painter.drawText(
+                QRectF(x, margin_top + plot_h + 8, wdt, 18),
+                anchors[idx],
+                self._fmt_ts(self._series[idx]["ts"]),
+            )
+
+        painter.end()
+
+    def mouseMoveEvent(self, event):
+        if not self._series:
+            return
+        rates = [s["rate"] for s in self._series]
+        w = self.width()
+        pad = 14
+        plot_w = w - 2 * pad
+        x = event.position().x()
+        if len(rates) > 1:
+            idx = int((x - pad) / plot_w * (len(rates) - 1))
+            idx = max(0, min(idx, len(rates) - 1))
+            if idx != self._hover_index:
+                self._hover_index = idx
+                self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        if self._hover_index is not None:
+            self._hover_index = None
+            self.update()
+        super().leaveEvent(event)
+
+    @staticmethod
+    def _fmt_ts(ts: str) -> str:
+        """Formatea una marca ISO a "HH:MM" (hoy) o "DD/MM HH:MM" (otros días)."""
+        try:
+            dt = datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return ""
+        if dt.date() == datetime.now().date():
+            return dt.strftime("%H:%M")
+        return dt.strftime("%d/%m %H:%M")
+
+
+# ──────────────────────────────────────────────────────── Alert Dialog (QDialog)
+# ---------------------------------------------------------------------------
+
+class AlertDialog(QDialog):
     """Ventana modal para crear o editar una alerta."""
 
-    def __init__(self, parent: ttk.Window, base_currency: str, alert: Alert | None = None) -> None:
-        self.parent = parent
+    def __init__(self, parent: QWidget, base_currency: str, alert: Alert | None = None):
+        super().__init__(parent)
         self.base_currency = base_currency
         self.alert = alert
         self.result: Alert | None = None
+        self.setWindowTitle("Nueva alerta" if alert is None else "Editar alerta")
+        self.setMinimumWidth(400)
+        self.setModal(True)
+        self._build_ui()
 
-        self.dialog = ttk.Toplevel(parent)
-        self.dialog.title("Nueva alerta" if alert is None else "Editar alerta")
-        self.dialog.grab_set()
-        self.dialog.resizable(False, False)
+    def _build_ui(self):
+        grid = QGridLayout(self)
+        grid.setSpacing(10)
 
-        self._build_widgets()
-        self._center_on_parent()
-        self.dialog.transient(parent)
-        self.dialog.bind("<Return>", lambda _e: self._save())
-        self.dialog.bind("<Escape>", lambda _e: self._cancel())
+        # Moneda
+        grid.addWidget(QLabel("Moneda:"), 0, 0)
+        self.currency_combo = QComboBox()
+        self.currency_combo.addItems(list(SUPPORTED_CURRENCIES.keys()))
+        if self.alert:
+            idx = self.currency_combo.findText(self.alert.currency)
+            if idx >= 0:
+                self.currency_combo.setCurrentIndex(idx)
+        grid.addWidget(self.currency_combo, 0, 1)
 
-    def _center_on_parent(self) -> None:
-        self.dialog.update_idletasks()
-        x = self.parent.winfo_rootx() + 40
-        y = self.parent.winfo_rooty() + 40
-        self.dialog.geometry(f"+{x}+{y}")
-
-    def _build_widgets(self) -> None:
-        pad = {"padx": 12, "pady": 6}
-
-        # ----- Moneda -----
-        ttk.Label(self.dialog, text="Moneda:").grid(row=0, column=0, sticky="w", **pad)
-        self.currency_var = tk.StringVar(
-            value=self.alert.currency if self.alert else "EUR"
-        )
-        currency_box = ttk.Combobox(
-            self.dialog,
-            textvariable=self.currency_var,
-            values=list(SUPPORTED_CURRENCIES.keys()),
-            state="readonly",
-            width=14,
-        )
-        currency_box.grid(row=0, column=1, sticky="w", **pad)
-
-        # ----- Condición -----
-        ttk.Label(self.dialog, text="Condición:").grid(row=1, column=0, sticky="w", **pad)
-        self.condition_var = tk.StringVar(
-            value=self.alert.condition if self.alert else "greater_than"
-        )
+        # Condición
+        grid.addWidget(QLabel("Condición:"), 1, 0)
+        self.condition_combo = QComboBox()
         condition_labels = [c["label"] for c in CONDITIONS.values()]
-        condition_box = ttk.Combobox(
-            self.dialog,
-            textvariable=self.condition_var,
-            values=condition_labels,
-            state="readonly",
-            width=32,
-        )
-        condition_box.grid(row=1, column=1, sticky="w", **pad)
-        condition_box.bind("<<ComboboxSelected>>", lambda _e: self._on_condition_change())
-        condition_box.bind("<<FocusOut>>", lambda _e: self._on_condition_change())
+        self.condition_combo.addItems(condition_labels)
+        if self.alert:
+            label = CONDITIONS.get(self.alert.condition, {}).get("label", "")
+            idx = self.condition_combo.findText(label)
+            if idx >= 0:
+                self.condition_combo.setCurrentIndex(idx)
+        self.condition_combo.currentIndexChanged.connect(self._on_condition_change)
+        grid.addWidget(self.condition_combo, 1, 1)
 
-        # ----- Valor (condiciones de umbral) -----
-        self.value_label = ttk.Label(self.dialog, text="Valor objetivo:")
-        self.value_label.grid(row=2, column=0, sticky="w", **pad)
-        self.value_var = tk.StringVar(
-            value=f"{self.alert.value:g}" if self.alert and self.alert.value else ""
-        )
-        self.value_entry = ttk.Entry(self.dialog, textvariable=self.value_var, width=32)
-        self.value_entry.grid(row=2, column=1, sticky="w", **pad)
+        # Valor
+        self.value_label = QLabel("Valor objetivo:")
+        grid.addWidget(self.value_label, 2, 0)
+        self.value_edit = QLineEdit()
+        if self.alert and self.alert.value:
+            self.value_edit.setText(f"{self.alert.value:g}")
+        grid.addWidget(self.value_edit, 2, 1)
 
-        # ----- Periodo (informe periódico) -----
-        self.period_label = ttk.Label(self.dialog, text="Periodo:")
-        self.period_var = tk.StringVar(
-            value=str(self.alert.period_hours if self.alert else 1)
-        )
-        self.period_box = ttk.Combobox(
-            self.dialog,
-            textvariable=self.period_var,
-            values=[str(h) for h in PERIOD_OPTIONS.keys()],
-            state="readonly",
-            width=20,
-        )
+        # Periodo
+        self.period_label = QLabel("Periodo:")
+        self.period_combo = QComboBox()
+        self.period_combo.addItems([str(h) for h in PERIOD_OPTIONS.keys()])
+        if self.alert:
+            idx = self.period_combo.findText(str(self.alert.period_hours))
+            if idx >= 0:
+                self.period_combo.setCurrentIndex(idx)
+        grid.addWidget(self.period_label, 3, 0)
+        grid.addWidget(self.period_combo, 3, 1)
+        self.period_label.hide()
+        self.period_combo.hide()
 
-        # ----- Opciones -----
-        self.notify_once_var = tk.BooleanVar(
-            value=self.alert.notify_once if self.alert else False
-        )
-        self.notify_once_check = ttk.Checkbutton(
-            self.dialog, text="Notificar una sola vez", variable=self.notify_once_var
-        )
-        self.notify_once_check.grid(row=3, column=1, sticky="w", **pad)
+        # Notify once
+        self.notify_once_check = QCheckBox("Notificar una sola vez")
+        if self.alert:
+            self.notify_once_check.setChecked(self.alert.notify_once)
+        grid.addWidget(self.notify_once_check, 4, 1)
 
-        self.enabled_var = tk.BooleanVar(
-            value=self.alert.enabled if self.alert else True
-        )
-        ttk.Checkbutton(
-            self.dialog, text="Activada al guardar", variable=self.enabled_var
-        ).grid(row=4, column=1, sticky="w", **pad)
+        # Enabled
+        self.enabled_check = QCheckBox("Activada al guardar")
+        self.enabled_check.setChecked(self.alert.enabled if self.alert else True)
+        grid.addWidget(self.enabled_check, 5, 1)
+
+        # Error label
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color: #e74c3c;")
+        self.error_label.hide()
+        grid.addWidget(self.error_label, 6, 0, 1, 2)
+
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._save)
+        buttons.rejected.connect(self.reject)
+        grid.addWidget(buttons, 7, 0, 1, 2)
 
         self._on_condition_change()
 
-        # ----- Botones -----
-        buttons = ttk.Frame(self.dialog)
-        buttons.grid(row=5, column=0, columnspan=2, pady=14)
-        ttk.Button(
-            buttons, text="Guardar", command=self._save, bootstyle="success", width=12,
-        ).pack(side="left", padx=8)
-        ttk.Button(
-            buttons, text="Cancelar", command=self._cancel, bootstyle="secondary", width=12,
-        ).pack(side="left", padx=8)
+    def _on_condition_change(self):
+        label = self.condition_combo.currentText()
+        is_p = label == CONDITIONS[PERIODIC_CONDITION]["label"]
+        self.value_label.setVisible(not is_p)
+        self.value_edit.setVisible(not is_p)
+        self.period_label.setVisible(is_p)
+        self.period_combo.setVisible(is_p)
+        self.notify_once_check.setVisible(not is_p)
 
-    def _on_condition_change(self) -> None:
-        """Muestra el campo adecuado según la condición: valor o periodo."""
-        is_periodic = self.condition_var.get() == CONDITIONS[PERIODIC_CONDITION]["label"]
-        if is_periodic:
-            self.value_label.grid_remove()
-            self.value_entry.grid_remove()
-            self.period_label.grid(row=2, column=0, sticky="w", **{"padx": 12, "pady": 6})
-            self.period_box.grid(row=2, column=1, sticky="w", **{"padx": 12, "pady": 6})
-            self.notify_once_check.grid_remove()
-        else:
-            self.period_label.grid_remove()
-            self.period_box.grid_remove()
-            self.value_label.grid()
-            self.value_entry.grid()
-            self.notify_once_check.grid(row=3, column=1, sticky="w", **{"padx": 12, "pady": 6})
-
-    def _save(self) -> None:
-        """Valida los campos y construye la Alert resultante."""
-        currency = self.currency_var.get()
+    def _save(self):
+        currency = self.currency_combo.currentText()
         if currency not in SUPPORTED_CURRENCIES:
-            self._show_error("Selecciona una moneda válida.")
+            self.error_label.setText("Selecciona una moneda válida.")
+            self.error_label.show()
             return
 
         labels = [c["label"] for c in CONDITIONS.values()]
-        picked_label = self.condition_var.get()
-        if picked_label not in labels:
-            self._show_error("Selecciona una condición válida.")
+        picked = self.condition_combo.currentText()
+        if picked not in labels:
+            self.error_label.setText("Selecciona una condición válida.")
+            self.error_label.show()
             return
-        condition = list(CONDITIONS.keys())[labels.index(picked_label)]
+        condition = list(CONDITIONS.keys())[labels.index(picked)]
 
-        # Solo se necesita valor para las condiciones de umbral.
         value = 0.0
         period_hours = 1
         if condition in THRESHOLD_CONDITIONS:
             try:
-                value = float(self.value_var.get().replace(",", "."))
+                value = float(self.value_edit.text().replace(",", "."))
             except ValueError:
-                self._show_error("El valor objetivo debe ser un número.")
+                self.error_label.setText("El valor objetivo debe ser un número.")
+                self.error_label.show()
                 return
-        else:  # informe periódico
+        else:
             try:
-                period_hours = int(self.period_var.get())
+                period_hours = int(self.period_combo.currentText())
             except ValueError:
                 period_hours = 1
             if period_hours not in PERIOD_OPTIONS:
@@ -229,8 +746,8 @@ class AlertDialog:
             "condition": condition,
             "value": value,
             "period_hours": period_hours,
-            "enabled": self.enabled_var.get(),
-            "notify_once": self.notify_once_var.get() if condition in THRESHOLD_CONDITIONS else False,
+            "enabled": self.enabled_check.isChecked(),
+            "notify_once": self.notify_once_check.isChecked() if condition in THRESHOLD_CONDITIONS else False,
         }
         if self.alert is not None and self.alert.last_fired_at:
             data["last_fired_at"] = self.alert.last_fired_at
@@ -238,400 +755,386 @@ class AlertDialog:
             data["id"] = self.alert.id
             data["created_at"] = self.alert.created_at
         self.result = Alert.from_dict(data)
-
-        self.dialog.destroy()
-
-    def _cancel(self) -> None:
-        self.dialog.destroy()
-
-    def _show_error(self, message: str) -> None:
-        """Muestra un aviso dentro de la ventana de alerta."""
-        reason = getattr(self, "_error_label", None)
-        if reason is None or not reason.winfo_exists():
-            self._error_label = ttk.Label(self.dialog, text="", bootstyle="danger")
-            self._error_label.grid(row=6, column=0, columnspan=2, **{"padx": 12, "pady": 4})
-        self._error_label.config(text=message)
+        self.accept()
 
 
-class CurrencyWatcherUI:
-    """Ventana principal de la aplicación."""
+# ──────────────────────────────────────────────── History Dialog (QDialog)
+# ---------------------------------------------------------------------------
+
+class HistoryDialog(QDialog):
+    """Popup con el historial de notificaciones emitidas."""
+
+    def __init__(self, log: list[str], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Historial de notificaciones")
+        self.setMinimumSize(460, 320)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Notificaciones emitidas"))
+
+        self.list_widget = QListWidget()
+        if log:
+            self.list_widget.addItems(log)
+        else:
+            self.list_widget.addItem("Todavía no hay notificaciones.")
+        layout.addWidget(self.list_widget)
+
+        btn = QPushButton("Cerrar")
+        btn.setProperty("cssClass", "outline")
+        btn.clicked.connect(self.accept)
+        layout.addWidget(btn, alignment=Qt.AlignCenter)
+
+
+# ──────────────────────────────────────────────── Main Window (QMainWindow)
+# ---------------------------------------------------------------------------
+
+class MainWindow(QMainWindow):
+    """Ventana principal de Currency Watcher."""
 
     def __init__(
         self,
-        root: ttk.Window,
         config: Config,
         config_manager: ConfigManager,
-        controller: RatesController,
         history: Any | None = None,
-    ) -> None:
-        self.root = root
+    ):
+        super().__init__()
         self.config = config
         self.config_manager = config_manager
-        self.controller = controller
         self.history = history
 
-        self.root.title("Currency Watcher — Monitor de tipos de cambio")
-        self.root.geometry("980x800")
-        self.root.minsize(860, 660)
+        self.setWindowTitle("Currency Watcher — Monitor de tipos de cambio")
+        self.resize(980, 800)
+        self.setMinimumSize(860, 660)
 
         # Estado de precios: {MONEDA: {"rate": float, "prev": float|None, "time": str}}
         self.rates_state: dict[str, dict[str, Any]] = {}
-        # Referencias de precio por alerta periódica: {id_alert: {"price": float, "time": str}}.
         self.periodic_refs: dict[str, dict[str, Any]] = {}
-        # Estado de estado de actualización global.
-        self.status_var = tk.StringVar(value="Listo")
-        # Registro de notificaciones emitidas por la app.
         self.notification_log: list[str] = []
-        # Historial de datos para el gráfico: {MONEDA: {"ts": [...], "rate": [...]}}.
-        self.chart_cache: dict[str, dict[str, list[Any]]] = {}
-        # Filtro de búsqueda de monedas.
-        self.search_term = tk.StringVar()
-        self.search_term.trace_add("write", lambda *a: self._render_table())
+        self._search_term = ""
+        self._only_fav = False
 
-        # Construcción de la interfaz.
+        # Worker thread (creado antes de _build_ui porque los botones se conectan a él)
+        self._worker = _WorkerThread(
+            get_base=lambda: self.config.base_currency,
+            history=self.history,
+            parent=self,
+        )
+        self._worker.signals.rates_ready.connect(self._on_rates)
+        self._worker.signals.error.connect(self._on_error)
+
         self._build_ui()
-        self._refresh_alerts_table()
+        self._apply_theme(config.theme)
+        self._refresh_alerts_list()
 
-        # Consumo periódico de la cola con resultados del worker asíncrono.
-        self.root.after(150, self._poll_results)
+        self._worker.start()
 
-        # Registramos el fallback de notificaciones dentro de la aplicación.
+        # Auto-refresh timer
+        self._auto_timer = QTimer(self)
+        self._auto_timer.timeout.connect(self._worker.request_refresh)
+        self._auto_timer.setInterval(config.refresh_interval * 1000)
+        if config.auto_refresh:
+            self._auto_timer.start()
+
+        # Notificaciones
         from notifier import set_fallback
-
         set_fallback(self._in_app_notification)
 
-    # ------------------------------------------------------------------ UI
+        # System tray
+        self._setup_tray()
 
-    def _build_ui(self) -> None:
-        self._build_header()
-        self._build_rates_table()
+        # Primera carga
+        QTimer.singleShot(250, self._worker.request_refresh)
+
+    # ──────────────────────────────────────────────────────── UI Build
+    # -------------------------------------------------------------------
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(4)
+
+        # Toolbar
+        self._build_toolbar(main_layout)
+
+        # Splitter: [tabla + gráfico] | [alertas]
+        splitter = QSplitter(Qt.Horizontal)
+        main_layout.addWidget(splitter, 1)
+
+        # Panel izquierdo: tabla + gráfico
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
+
+        self._build_rates_table(left_layout)
+        self._build_chart(left_layout)
+        splitter.addWidget(left)
+
+        # Panel derecho: alertas
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        self._build_alerts_panel(right_layout)
+        splitter.addWidget(right)
+
+        splitter.setSizes([650, 310])
+
+        # Status bar
         self._build_status_bar()
-        self._build_alerts_panel()
 
-    def _build_header(self) -> None:
-        header = ttk.Frame(self.root)
-        header.pack(fill="x", padx=10, pady=(10, 6))
+    def _build_toolbar(self, parent_layout: QVBoxLayout):
+        toolbar = QToolBar("Principal")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
 
-        ttk.Label(
-            header, text="Currency Watcher", font=("Times New Roman", 18, "bold")
-        ).pack(side="left", padx=(0, 20))
+        toolbar.addWidget(QLabel("Moneda base:"))
+        self.base_combo = QComboBox()
+        self.base_combo.addItems(list(SUPPORTED_CURRENCIES.keys()))
+        idx = self.base_combo.findText(self.config.base_currency)
+        if idx >= 0:
+            self.base_combo.setCurrentIndex(idx)
+        self.base_combo.currentIndexChanged.connect(self._on_base_change)
+        toolbar.addWidget(self.base_combo)
 
-        # Selector de moneda base.
-        ttk.Label(header, text="Moneda base:").pack(side="left")
-        self.base_var = tk.StringVar(value=self.config.base_currency)
-        base_box = ttk.Combobox(
-            header,
-            textvariable=self.base_var,
-            values=list(SUPPORTED_CURRENCIES.keys()),
-            state="readonly",
-            width=5,
-        )
-        base_box.pack(side="left", padx=6)
-        base_box.bind("<<ComboboxSelected>>", lambda _e: self._on_base_change())
+        toolbar.addSeparator()
 
-        # Segunda fila: tema, intervalo, auto y exportar.
-        toolbar = ttk.Frame(self.root)
-        toolbar.pack(fill="x", padx=10, pady=(0, 6))
+        toolbar.addWidget(QLabel("Tema:"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(list(THEMES.keys()))
+        idx = self.theme_combo.findText(self.config.theme)
+        if idx >= 0:
+            self.theme_combo.setCurrentIndex(idx)
+        self.theme_combo.currentIndexChanged.connect(self._on_theme_change)
+        toolbar.addWidget(self.theme_combo)
 
-        ttk.Label(toolbar, text="Tema:").pack(side="left")
-        self.theme_var = tk.StringVar(value=self.config.theme)
-        theme_box = ttk.Combobox(
-            toolbar,
-            textvariable=self.theme_var,
-            values=list(THEMES),
-            state="readonly",
-            width=10,
-        )
-        theme_box.pack(side="left", padx=6)
-        theme_box.bind("<<ComboboxSelected>>", lambda _e: self._on_theme_change())
+        toolbar.addSeparator()
 
-        # Botón de actualización manual.
-        ttk.Button(
-            toolbar, text="Actualizar", command=self.manual_refresh, bootstyle="primary"
-        ).pack(side="left", padx=10)
+        btn_refresh = QPushButton("Actualizar")
+        btn_refresh.clicked.connect(self._worker.request_refresh)
+        toolbar.addWidget(btn_refresh)
 
-        # Selector de intervalo.
-        ttk.Label(toolbar, text="Intervalo:").pack(side="left", padx=(10, 0))
-        self.interval_var = tk.IntVar(value=self.config.refresh_interval)
-        interval_box = ttk.Combobox(
-            toolbar,
-            textvariable=self.interval_var,
-            values=[30, 60, 300],
-            state="readonly",
-            width=6,
-        )
-        interval_box.pack(side="left", padx=6)
-        interval_box.bind("<<ComboboxSelected>>", lambda _e: self._on_interval_change())
+        toolbar.addWidget(QLabel("Intervalo:"))
+        self.interval_combo = QComboBox()
+        self.interval_combo.addItems(["30", "60", "300"])
+        idx = self.interval_combo.findText(str(self.config.refresh_interval))
+        if idx >= 0:
+            self.interval_combo.setCurrentIndex(idx)
+        self.interval_combo.currentIndexChanged.connect(self._on_interval_change)
+        toolbar.addWidget(self.interval_combo)
 
-        # Botón iniciar/detener actualización automática.
-        self.auto_var = tk.BooleanVar(value=self.config.auto_refresh)
-        self.auto_button = ttk.Checkbutton(
-            toolbar,
-            text="Auto",
-            variable=self.auto_var,
-            command=self._on_auto_toggle,
-            bootstyle="round-toggle",
-        )
-        self.auto_button.pack(side="left", padx=10)
+        self.auto_check = QCheckBox("Auto")
+        self.auto_check.setChecked(self.config.auto_refresh)
+        self.auto_check.toggled.connect(self._on_auto_toggle)
+        toolbar.addWidget(self.auto_check)
 
-        # Botón de exportación de datos y configuración.
-        ttk.Button(
-            toolbar, text="Exportar", command=self._export, bootstyle="secondary-outline"
-        ).pack(side="right", padx=6)
+        from PySide6.QtWidgets import QSizePolicy
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        toolbar.addWidget(spacer)
 
-    def _build_rates_table(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="Precios actuales", padding=8)
-        frame.pack(fill="both", expand=True, padx=10, pady=6)
+        btn_export = QPushButton("Exportar")
+        btn_export.setProperty("cssClass", "outline")
+        btn_export.clicked.connect(self._export)
+        toolbar.addWidget(btn_export)
 
-        # Fila con buscador y selectors de rango para el gráfico.
-        top = ttk.Frame(frame)
-        top.pack(fill="x", pady=(0, 4))
-        ttk.Label(top, text="Buscar:").pack(side="left")
-        ttk.Entry(top, textvariable=self.search_term, width=16).pack(side="left", padx=6)
-        ttk.Label(top, text="Gráfico último:").pack(side="left", padx=(14, 0))
-        self.chart_range_var = tk.StringVar(value="24h")
-        range_box = ttk.Combobox(
-            top,
-            textvariable=self.chart_range_var,
-            values=["6h", "24h", "3d", "7d"],
-            state="readonly",
-            width=6,
-        )
-        range_box.pack(side="left", padx=6)
-        range_box.bind("<<ComboboxSelected>>", lambda _e: self._render_chart())
+    def _build_rates_table(self, layout: QVBoxLayout):
+        group = QGroupBox("Precios actuales")
+        group_layout = QVBoxLayout(group)
 
-        self.only_fav_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            top, text="Solo favoritas", variable=self.only_fav_var,
-            command=lambda: self._render_table(),
-        ).pack(side="left", padx=(14, 0))
+        # Buscador y filtro
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Buscar:"))
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Filtrar moneda...")
+        self.search_edit.setMaximumWidth(180)
+        self.search_edit.textChanged.connect(self._on_search)
+        top.addWidget(self.search_edit)
 
-        cols_frame = ttk.Frame(frame)
-        cols_frame.pack(fill="x")
+        top.addWidget(QLabel("Gráfico:"))
+        self.chart_currency_combo = QComboBox()
+        self.chart_currency_combo.currentIndexChanged.connect(self._on_chart_currency_change)
+        self._rebuild_chart_currency_combo()
+        top.addWidget(self.chart_currency_combo)
 
-        columns = ("fav", "clock", "currency", "currency_name", "price", "time", "change", "change_pct", "status")
-        self.tree = ttk.Treeview(cols_frame, columns=columns, show="headings", height=6)
+        top.addWidget(QLabel("último:"))
+        self.range_combo = QComboBox()
+        self.range_combo.addItems(["6h", "24h", "3d", "7d"])
+        self.range_combo.setCurrentText("24h")
+        self.range_combo.currentIndexChanged.connect(self._on_range_change)
+        top.addWidget(self.range_combo)
 
-        headings = [
-            ("fav", "Fav"),
-            ("clock", "Símbolo"),
-            ("currency", "Código"),
-            ("currency_name", "Moneda"),
-            ("price", "Precio actual"),
-            ("time", "Última actualización"),
-            ("change", "Cambio"),
-            ("change_pct", "Variación"),
-            ("status", "Estado"),
-        ]
-        widths = {
-            "fav": 32,
-            "clock": 40,
-            "currency": 70,
-            "currency_name": 170,
-            "price": 110,
-            "time": 130,
-            "change": 90,
-            "change_pct": 90,
-            "status": 100,
-        }
-        for col_name, text in headings:
-            self.tree.heading(col_name, text=text, anchor="center")
-            self.tree.column(col_name, width=widths[col_name], anchor="center")
+        self.fav_check = QCheckBox("Solo favoritas")
+        self.fav_check.toggled.connect(self._on_fav_toggle)
+        top.addWidget(self.fav_check)
+        top.addStretch()
+        group_layout.addLayout(top)
 
-        scroll = ttk.Scrollbar(cols_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        # Tabla MVC
+        self.table_model = RateTableModel()
+        self.table_view = QTableView()
+        self.table_view.setModel(self.table_model)
+        self.table_view.setSelectionBehavior(QTableView.SelectRows)
+        self.table_view.setSelectionMode(QTableView.SingleSelection)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.setShowGrid(True)
+        self.table_view.verticalHeader().setVisible(False)
+        header = self.table_view.horizontalHeader()
+        header.setStretchLastSection(True)
+        for i, w in enumerate(COL_WIDTHS):
+            header.resizeSection(i, w)
+        self.table_view.clicked.connect(self._on_table_click)
+        group_layout.addWidget(self.table_view)
 
-        # Click en la columna Fav alterna el marcado de favorita.
-        self.tree.bind("<Button-1>", self._on_tree_click)
+        layout.addWidget(group, 1)
 
-        # Tagging de colores: verde=sube, rojo=baja, gris/amarillo=sin datos/error.
-        self.tree.tag_configure("up", foreground="#2ecc71")
-        self.tree.tag_configure("down", foreground="#e74c3c")
-        self.tree.tag_configure("neutral", foreground="#f1c40f")
-        self.tree.tag_configure("error", foreground="#95a5a6")
-        self.tree.tag_configure("favorite", foreground="#f39c12")
+    def _build_chart(self, layout: QVBoxLayout):
+        group = QGroupBox("Evolución histórica")
+        group_layout = QVBoxLayout(group)
+        self.chart = ChartWidget()
+        group_layout.addWidget(self.chart)
+        layout.addWidget(group)
 
-        # Panel de gráfico histórico (Canvas nativo).
-        chart_frame = ttk.LabelFrame(self.root, text="Evolución histórica", padding=6)
-        chart_frame.pack(fill="x", padx=10, pady=(0, 6))
-        self.chart_canvas = tk.Canvas(chart_frame, height=120, bg="#141414", highlightthickness=0)
-        self.chart_canvas.pack(fill="both", expand=True)
-        self.chart_canvas.bind("<Configure>", lambda _e: self._render_chart())
-        self._chart_currency = "EUR"
+    def _build_alerts_panel(self, layout: QVBoxLayout):
+        group = QGroupBox("Alertas / Notificaciones")
+        group_layout = QVBoxLayout(group)
 
-    def _build_status_bar(self) -> None:
-        bar = ttk.Frame(self.root)
-        bar.pack(fill="x", padx=10, pady=(2, 6))
+        self.alerts_list = QListWidget()
+        group_layout.addWidget(self.alerts_list, 1)
 
-        self.status_dot = ttk.Label(bar, text="●", width=2, bootstyle="secondary")
-        self.status_dot.pack(side="left")
-        ttk.Label(bar, textvariable=self.status_var).pack(side="left", padx=6)
+        # Botones de acciones
+        btns = QVBoxLayout()
+        btn_new = QPushButton("Nueva alerta")
+        btn_new.setProperty("cssClass", "success")
+        btn_new.clicked.connect(self._new_alert)
+        btns.addWidget(btn_new)
 
-        self.msg_label = ttk.Label(bar, text="", bootstyle="secondary")
-        self.msg_label.pack(side="right")
+        btn_edit = QPushButton("Editar")
+        btn_edit.clicked.connect(self._edit_alert)
+        btns.addWidget(btn_edit)
 
-    def _build_alerts_panel(self) -> None:
-        panel = ttk.LabelFrame(self.root, text="Alertas / Notificaciones", padding=8)
-        panel.pack(fill="x", padx=10, pady=(6, 10))
+        btn_toggle = QPushButton("Activar / Desactivar")
+        btn_toggle.setProperty("cssClass", "warning")
+        btn_toggle.clicked.connect(self._toggle_alert)
+        btns.addWidget(btn_toggle)
 
-        row = ttk.Frame(panel)
-        row.pack(fill="x")
+        btn_delete = QPushButton("Eliminar")
+        btn_delete.setProperty("cssClass", "danger")
+        btn_delete.clicked.connect(self._delete_alert)
+        btns.addWidget(btn_delete)
 
-        # Subpanel de alertas.
-        cols = ttk.Frame(row)
-        cols.pack(side="left", fill="both", expand=True)
-        bs = ttk.Frame(cols)
-        bs.pack(fill="x")
-        ttk.Label(bs, text="Alertas activas", font=("", 9, "bold")).pack(side="left")
+        btn_history = QPushButton("Historial de notificaciones")
+        btn_history.setProperty("cssClass", "outline")
+        btn_history.clicked.connect(self._show_history)
+        btns.addWidget(btn_history)
 
-        inner = ttk.Frame(cols)
-        inner.pack(fill="both", expand=True)
-        self.alerts_list = tk.Listbox(inner, height=4)
-        self.alerts_list.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(inner, orient="vertical", command=self.alerts_list.yview)
-        self.alerts_list.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="left", fill="y")
+        group_layout.addLayout(btns)
+        layout.addWidget(group)
 
-        actions = ttk.Frame(row)
-        actions.pack(side="right", padx=(10, 0), fill="y")
-        ttk.Button(
-            actions, text="Nueva alerta", command=self._new_alert, bootstyle="success"
-        ).pack(fill="x", pady=2)
-        ttk.Button(
-            actions, text="Editar", command=self._edit_alert, bootstyle="primary"
-        ).pack(fill="x", pady=2)
-        ttk.Button(
-            actions, text="Activar / Desactivar", command=self._toggle_alert, bootstyle="warning"
-        ).pack(fill="x", pady=2)
-        ttk.Button(
-            actions, text="Eliminar", command=self._delete_alert, bootstyle="danger"
-        ).pack(fill="x", pady=2)
-        ttk.Button(
-            actions, text="Historial de notificaciones", command=self._show_history, bootstyle="secondary-outline"
-        ).pack(fill="x", pady=2)
+    def _build_status_bar(self):
+        bar = self.statusBar()
+        self.status_label = QLabel("● Listo")
+        bar.addWidget(self.status_label)
+        self.msg_label = QLabel("")
+        bar.addPermanentWidget(self.msg_label)
 
-    # ------------------------------------------------------------ status
+    # ──────────────────────────────────────────────────────── Theme
+    # -------------------------------------------------------------------
 
-    def _set_status(self, text: str, style: str = "secondary") -> None:
-        """Actualiza la barra de estado (actualizando, actualizado, error)."""
-        self.status_var.set(text)
-        try:
-            self.status_dot.configure(bootstyle=style)
-        except Exception:
-            pass
+    def _apply_theme(self, theme_name: str):
+        if theme_name not in THEMES:
+            theme_name = "darkly" if "darkly" in THEMES else list(THEMES.keys())[0]
+        theme = THEMES[theme_name]
+        app = QApplication.instance()
+        if app:
+            app.setStyleSheet(build_qss(theme))
+        global COLOR_TEXT, COLOR_BG, COLOR_SURFACE, COLOR_SURFACE_ALT, COLOR_BORDER, COLOR_FAV
+        COLOR_TEXT = theme["fg"]
+        COLOR_BG = theme["bg"]
+        COLOR_SURFACE = theme["surface"]
+        COLOR_SURFACE_ALT = _shade(theme["surface"], 0.92 if theme["bg"].startswith("#f") or theme["bg"] == "#fff" else 1.12)
+        COLOR_BORDER = theme["border"]
+        COLOR_FAV = theme.get("warning", "#f39c12")
+        self.chart.update()
 
-    def _set_message(self, text: str, style: str = "secondary") -> None:
-        self.msg_label.configure(text=text, bootstyle=style)
+    # ──────────────────────────────────────────────────── Slots / Events
+    # -------------------------------------------------------------------
 
-    # ------------------------------------------------ interacción de UI
+    def _rebuild_chart_currency_combo(self):
+        """Refresca el desplegable de moneda del gráfico según la base actual.
 
-    def _on_base_change(self) -> None:
-        self.config.base_currency = self.base_var.get()
-        self.controller.request()
+        Excluye la moneda base y conserva la selección anterior si existe.
+        """
+        current = self.chart_currency_combo.currentData()
+        self.chart_currency_combo.blockSignals(True)
+        self.chart_currency_combo.clear()
+        base = self.config.base_currency
+        for code, name in SUPPORTED_CURRENCIES.items():
+            if code == base:
+                continue
+            self.chart_currency_combo.addItem(f"{code} ({name})", userData=code)
+        idx = self.chart_currency_combo.findData(current if current != base else "EUR")
+        if idx < 0:
+            idx = self.chart_currency_combo.findData("EUR")
+        self.chart_currency_combo.setCurrentIndex(max(0, idx))
+        self.chart_currency_combo.blockSignals(False)
+
+    def _on_base_change(self):
+        self.config.base_currency = self.base_combo.currentText()
+        self._rebuild_chart_currency_combo()
+        self._render_chart()
+        self._worker.request_refresh()
         self._save_config()
 
-    def _on_interval_change(self) -> None:
-        self.config.refresh_interval = int(self.interval_var.get())
-        self._save_config()
-
-    def _on_auto_toggle(self) -> None:
-        self.config.auto_refresh = self.auto_var.get()
-        if self.config.auto_refresh:
-            self.controller.request()
-        self._save_config()
-
-    def manual_refresh(self) -> None:
-        self.controller.request()
-
-    def _on_theme_change(self) -> None:
-        theme = self.theme_var.get()
+    def _on_theme_change(self):
+        theme = self.theme_combo.currentText()
         if theme not in THEMES:
             return
         self.config.theme = theme
-        try:
-            self.root.style.theme_use(theme)
-        except Exception:
-            self.root.style.theme_use("darkly")
-            self.config.theme = "darkly"
-            self.theme_var.set("darkly")
+        self._apply_theme(theme)
         self._save_config()
 
-    def _push_notification(self, text: str) -> None:
-        """Añade una entrada al historial de notificaciones dentro de la app."""
-        self.notification_log.append(text)
-        if len(self.notification_log) > 50:
-            self.notification_log = self.notification_log[-50:]
-
-    def _show_history(self) -> None:
-        """Abre un pop-up con el historial de notificaciones emitidas."""
-        win = ttk.Toplevel(self.root)
-        win.title("Historial de notificaciones")
-        win.transient(self.root)
-        win.grab_set()
-        win.geometry("460x320")
-        pad = {"padx": 10, "pady": 6}
-
-        ttk.Label(win, text="Notificaciones emitidas", font=("", 10, "bold")).pack(**pad)
-
-        if not self.notification_log:
-            ttk.Label(win, text="Todavía no hay notificaciones.", bootstyle="secondary").pack(**pad)
-        else:
-            frame = ttk.Frame(win)
-            frame.pack(fill="both", expand=True, **pad)
-            lst = tk.Listbox(frame, height=12)
-            lst.pack(side="left", fill="both", expand=True)
-            scroll = ttk.Scrollbar(frame, orient="vertical", command=lst.yview)
-            lst.configure(yscrollcommand=scroll.set)
-            scroll.pack(side="right", fill="y")
-            for item in self.notification_log:
-                lst.insert(tk.END, item)
-
-        ttk.Button(
-            win, text="Cerrar", command=win.destroy, bootstyle="secondary", width=12,
-        ).pack(pady=12)
-
-    def _export(self) -> None:
-        """Exporta la configuración (y tasas guardadas) a JSON/CSV en el directorio actual."""
+    def _on_interval_change(self):
         try:
-            from pathlib import Path
-
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_dir = Path(__file__).resolve().parent
-
-            cfg_path = base_dir / f"config_backup_{ts}.json"
-            cfg_path.write_text(
-                json.dumps(self.config.to_dict(), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-
-            csv_path = base_dir / f"rates_{ts}.csv"
-            with open(csv_path, "w", encoding="utf-8", newline="") as fh:
-                writer = csv.writer(fh)
-                writer.writerow(["base", "currency", "rate", "ts"])
-                if self.history is not None:
-                    for base in [self.config.base_currency]:
-                        for currency in SUPPORTED_CURRENCIES:
-                            for sample in self.history.series(base, currency, hours=24 * 30, limit=10000):
-                                writer.writerow([base, currency, sample["rate"], sample["ts"]])
-
-            self._set_message(
-                f"Exportado: {cfg_path.name}, {csv_path.name}", "success"
-            )
-        except Exception as exc:
-            self._set_message(f"No se pudo exportar: {exc}", "danger")
-
-    def _on_tree_click(self, event: tk.Event) -> None:
-        """Alterna el marcado de favorita al hacer clic en la columna Fav."""
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "cell":
+            self.config.refresh_interval = int(self.interval_combo.currentText())
+        except ValueError:
             return
-        column = self.tree.identify_column(event.x)
-        if column == "#1":
-            item = self.tree.identify_row(event.y)
-            if item:
-                code = self.tree.item(item, "values")[2]
+        self._auto_timer.setInterval(self.config.refresh_interval * 1000)
+        self._save_config()
+
+    def _on_auto_toggle(self, checked):
+        self.config.auto_refresh = checked
+        if checked:
+            self._auto_timer.start()
+            self._worker.request_refresh()
+        else:
+            self._auto_timer.stop()
+        self._save_config()
+
+    def _on_search(self, text):
+        self._search_term = text.strip().lower()
+        self._render_table()
+
+    def _on_fav_toggle(self, checked):
+        self._only_fav = checked
+        self._render_table()
+
+    def _on_range_change(self):
+        self._render_chart()
+
+    def _on_chart_currency_change(self):
+        self._render_chart()
+
+    def _on_table_click(self, index: QModelIndex):
+        if not index.isValid():
+            return
+        col = index.column()
+        if col == 0:  # Fav column
+            row = index.row()
+            code = self.table_model.get_code(row)
+            if code:
                 if code in self.config.favorites:
                     self.config.favorites.remove(code)
                 else:
@@ -639,168 +1142,13 @@ class CurrencyWatcherUI:
                 self._save_config()
                 self._render_table()
 
-    def _render_chart(self) -> None:
-        """Dibuja el gráfico de evolución histórica en el Canvas nativo."""
-        if self.history is None:
-            return
-        w = self.chart_canvas.winfo_width()
-        h = self.chart_canvas.winfo_height()
-        if w <= 1 or h <= 1:
-            return
-        base = self.config.base_currency
-        range_label = self.chart_range_var.get()
-        hours_map = {"6h": 6, "24h": 24, "3d": 72, "7d": 168}
-        hours = hours_map.get(range_label, 24)
+    # ──────────────────────────────────────────────────── Data / Rendering
+    # ----------------------------------------------------------------------
 
-        series = self.history.series(base, self._chart_currency, hours=hours, limit=1000)
-        self.chart_canvas.delete("all")
-        if not series:
-            self.chart_canvas.create_text(
-                w / 2, h / 2, text="Sin historial suficiente aún",
-                fill="#95a5a6", font=("", 10),
-            )
-            return
-
-        rates = [s["rate"] for s in series]
-        mn, mx = min(rates), max(rates)
-        span = mx - mn or 1.0
-        pad = 12
-        margin_bottom = 20
-        margin_top = 14
-        plot_h = h - margin_bottom - margin_top
-        plot_w = w - 2 * pad
-
-        def scale_x(i: int) -> float:
-            if len(rates) <= 1:
-                return pad + 1
-            return pad + (i / (len(rates) - 1)) * plot_w
-
-        def scale_y(rate: float) -> float:
-            ratio = (rate - mn) / span
-            return margin_top + (1.0 - ratio) * plot_h
-
-        # Dibujamos la línea de precios y el área sombreada.
-        pts = []
-        for i, rate in enumerate(rates):
-            pts.append(scale_x(i))
-            pts.append(scale_y(rate))
-        self.chart_canvas.create_polygon(
-            [pad, plot_h + margin_top, *pts, w - pad, plot_h + margin_top],
-            fill="#2ecc71", outline="" if False else "", tags="chart",
-        )
-        self.chart_canvas.create_line(pts, fill="#2ecc71", width=2)
-
-        # Línea de meta inferior y etiquetas mín/máx.
-        self.chart_canvas.create_line(
-            pad, plot_h + margin_top, w - pad, plot_h + margin_top, fill="#555"
-        )
-        self.chart_canvas.create_text(
-            pad + 4, plot_h + margin_top - 4, text=f"min {mn:.6g}",
-            anchor="sw", fill="#95a5a6", font=("", 8),
-        )
-        self.chart_canvas.create_text(
-            w - pad - 4, margin_top + 4, text=f"max {mx:.6g}",
-            anchor="ne", fill="#95a5a6", font=("", 8),
-        )
-
-        name = SUPPORTED_CURRENCIES.get(self._chart_currency, self._chart_currency)
-        self.chart_canvas.create_text(
-            pad + 4, margin_top - 2, text=f"{self._chart_currency} ({name})",
-            anchor="nw", fill="#f39c12", font=("", 9, "bold"),
-        )
-        self.chart_canvas.create_text(
-            w - pad - 4, plot_h + margin_top - 4,
-            text=f"último {range_label}", anchor="se",
-            fill="#95a5a6", font=("", 8),
-        )
-
-    # ---------------------------------------------------- gestión alertas
-
-    def _refresh_alerts_table(self) -> None:
-        """Vuelve a pintar la lista de alertas desde la configuración actual."""
-        self.alerts_list.delete(0, tk.END)
-        for alert in self.config.alerts:
-            state = "ON " if alert.enabled else "OFF"
-            once = " (1 vez)" if alert.notify_once else ""
-            self.alerts_list.insert(tk.END, f"[{state}]{once} {_alert_line(alert)}")
-
-    def _selected_alert(self) -> Alert | None:
-        sel = self.alerts_list.curselection()
-        if not sel:
-            return None
-        idx = sel[0]
-        if idx >= len(self.config.alerts):
-            return None
-        return self.config.alerts[idx]
-
-    def _new_alert(self) -> None:
-        dialog = AlertDialog(self.root, self.config.base_currency)
-        self.root.wait_window(dialog.dialog)
-        if dialog.result is not None:
-            self.config_manager.add_alert(self.config, dialog.result.to_dict())
-            self._save_config()
-            self._refresh_alerts_table()
-
-    def _edit_alert(self) -> None:
-        alert = self._selected_alert()
-        if alert is None:
-            self._set_message("Selecciona una alerta para editar.", "warning")
-            return
-        working = copy_alert(alert)
-        dialog = AlertDialog(self.root, self.config.base_currency, working)
-        self.root.wait_window(dialog.dialog)
-        if dialog.result is not None:
-            self.config_manager.update_alert(
-                self.config, alert.id, dialog.result.to_dict()
-            )
-            self._save_config()
-            self._refresh_alerts_table()
-
-    def _toggle_alert(self) -> None:
-        alert = self._selected_alert()
-        if alert is None:
-            self._set_message("Selecciona una alerta para activar/desactivar.", "warning")
-            return
-        alert.enabled = not alert.enabled
-        if alert.enabled:
-            # Al re-activar, permitimos que vuelva a dispararse.
-            alert.trigger_on_next_check = False
-        self._save_config()
-        self._refresh_alerts_table()
-        self._set_message(f"Alerta {alert.currency} {'activada' if alert.enabled else 'desactivada'}.")
-
-    def _delete_alert(self) -> None:
-        alert = self._selected_alert()
-        if alert is None:
-            self._set_message("Selecciona una alerta para eliminar.", "warning")
-            return
-        self.config_manager.delete_alert(self.config, alert.id)
-        self._save_config()
-        self._refresh_alerts_table()
-        self._set_message(f"Alerta {alert.currency} eliminada.")
-
-    # ------------------------------------------- consumo de resultados
-
-    def _poll_results(self) -> None:
-        """Vuelve a programarse a sí misma y drena la cola de resultados."""
-        try:
-            while True:
-                item = self.controller.results.get_nowait()
-                kind = item.get("kind")
-                if kind == "rates":
-                    self._apply_rates(item)
-                elif kind == "error":
-                    self._apply_error(item)
-                elif kind == "notify":
-                    self._set_message(item.get("message", ""), "info")
-        except queue.Empty:
-            pass
-        self.root.after(150, self._poll_results)
-
-    def _apply_rates(self, item: dict[str, Any]) -> None:
-        """Actualiza la tabla de precios con un resultado exitoso."""
-        rates: dict[str, float] = item["rates"]
-        base: str = item["base"]
+    @Slot(dict)
+    def _on_rates(self, item: dict):
+        rates = item["rates"]
+        base = item["base"]
         stamp = item["stamp"]
         now = datetime.now().strftime("%H:%M:%S")
 
@@ -812,40 +1160,35 @@ class CurrencyWatcherUI:
 
         self._render_table(base, now)
         self._render_chart()
-        # Tras actualizar precios, evaluamos las alertas sobre los nuevos datos.
         self._check_alerts()
+        self._set_status(f"Actualizado {now}")
+        self.msg_label.setText("")
 
-        self._set_status(f"Actualizado {now}", "success")
-        self._set_message("", "")
-
-    def _apply_error(self, item: dict[str, Any]) -> None:
-        """Muestra un error de red/API en la interfaz sin cerrar la app."""
+    @Slot(str)
+    def _on_error(self, message: str):
         now = datetime.now().strftime("%H:%M:%S")
-        self._set_status(f"Error {now}", "danger")
-        self._set_message(item.get("message", "Error desconocido."), "danger")
-        # Pintamos las filas con estado error si no hay datos previos.
+        self._set_status(f"Error {now}")
+        self.msg_label.setText(message)
+        self.msg_label.setStyleSheet(f"color: {COLOR_DOWN};")
         for code in SUPPORTED_CURRENCIES:
             if code not in self.rates_state:
                 self.rates_state[code] = {"rate": None, "prev": None, "time": None}
-        self._render_table(base=item.get("base", self.config.base_currency), now=now)
+        self._render_table(self.config.base_currency, now)
 
-    def _render_table(self, base: str | None = None, now: str | None = None) -> None:
-        """Rellena el Treeview con el estado actual de las monedas."""
+    def _render_table(self, base: str | None = None, now: str | None = None):
         if base is None:
             base = self.config.base_currency
         if now is None:
             now = datetime.now().strftime("%H:%M:%S")
 
-        query = self.search_term.get().strip().lower()
-        only_fav = self.only_fav_var.get()
-
-        for child in self.tree.get_children():
-            self.tree.delete(child)
+        rows = []
+        colors = []
+        fav_colors = []
 
         for code, name in SUPPORTED_CURRENCIES.items():
             if code == base:
                 continue
-            if query and query not in code.lower() and query not in name.lower():
+            if self._search_term and self._search_term not in code.lower() and self._search_term not in name.lower():
                 continue
             state = self.rates_state.get(code)
             rate = state["rate"] if state else None
@@ -853,10 +1196,10 @@ class CurrencyWatcherUI:
             stamp = state["time"] if state else None
 
             is_fav = code in self.config.favorites
-            if only_fav and not is_fav:
+            if self._only_fav and not is_fav:
                 continue
 
-            tag = "neutral"
+            tag_color = ""
             change_text = "—"
             pct_text = "—"
             status_text = "OK" if rate is not None else "Sin datos"
@@ -866,70 +1209,131 @@ class CurrencyWatcherUI:
                 if abs(diff) < 1e-12:
                     change_text = "0"
                     pct_text = "0.00%"
-                    tag = "neutral"
                 elif diff > 0:
                     change_text = f"+{diff:.6g}"
                     pct_text = f"+{(diff / prev) * 100:.2f}%"
-                    tag = "up"
+                    tag_color = COLOR_UP
                 else:
                     change_text = f"{diff:.6g}"
                     pct_text = f"{(diff / prev) * 100:.2f}%"
-                    tag = "down"
+                    tag_color = COLOR_DOWN
 
-            tags = (tag, "favorite") if is_fav else (tag,)
             price_display = f"{rate:.6g}" if rate is not None else "—"
             time_display = (stamp or "—").split("T")[-1][:8] if stamp else "—"
 
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    "★" if is_fav else "☆",
-                    CURRENCY_SYMBOLS.get(code, code),
-                    code,
-                    name,
-                    price_display,
-                    time_display,
-                    change_text,
-                    pct_text,
-                    status_text,
-                ),
-                tags=tags,
-            )
+            rows.append([
+                "★" if is_fav else "☆",
+                CURRENCY_SYMBOLS.get(code, code),
+                code,
+                name,
+                price_display,
+                time_display,
+                change_text,
+                pct_text,
+                status_text,
+            ])
+            colors.append(tag_color)
+            fav_colors.append(COLOR_FAV if is_fav else "")
 
-    # ------------------------------------------------------- alerts check
+        self.table_model.update_data(rows, colors, fav_colors)
 
-    def _check_alerts(self) -> None:
-        """Evalúa todas las alertas habilitadas contra los últimos precios."""
+    def _render_chart(self):
+        if self.history is None:
+            return
+        base = self.config.base_currency
+        range_label = self.range_combo.currentText()
+        hours_map = {"6h": 6, "24h": 24, "3d": 72, "7d": 168}
+        hours = hours_map.get(range_label, 24)
+
+        idx = self.chart_currency_combo.currentIndex()
+        cur = self.chart_currency_combo.itemData(idx) if idx >= 0 else "EUR"
+
+        series = self.history.series(base, cur, hours=hours, limit=1000)
+        self.chart.set_data(series, cur, range_label)
+
+    # ──────────────────────────────────────────────────── Alerts
+    # -----------------------------------------------------------------
+
+    def _refresh_alerts_list(self):
+        self.alerts_list.clear()
+        for alert in self.config.alerts:
+            state = "ON " if alert.enabled else "OFF"
+            once = " (1 vez)" if alert.notify_once else ""
+            self.alerts_list.addItem(f"[{state}]{once} {describe_condition(alert)}")
+
+    def _selected_alert(self) -> Alert | None:
+        row = self.alerts_list.currentRow()
+        if row < 0 or row >= len(self.config.alerts):
+            return None
+        return self.config.alerts[row]
+
+    def _new_alert(self):
+        dlg = AlertDialog(self, self.config.base_currency)
+        if dlg.exec() == QDialog.Accepted and dlg.result is not None:
+            self.config_manager.add_alert(self.config, dlg.result.to_dict())
+            self._save_config()
+            self._refresh_alerts_list()
+
+    def _edit_alert(self):
+        alert = self._selected_alert()
+        if alert is None:
+            self.msg_label.setText("Selecciona una alerta para editar.")
+            return
+        working = copy_alert(alert)
+        dlg = AlertDialog(self, self.config.base_currency, working)
+        if dlg.exec() == QDialog.Accepted and dlg.result is not None:
+            self.config_manager.update_alert(self.config, alert.id, dlg.result.to_dict())
+            self._save_config()
+            self._refresh_alerts_list()
+
+    def _toggle_alert(self):
+        alert = self._selected_alert()
+        if alert is None:
+            self.msg_label.setText("Selecciona una alerta para activar/desactivar.")
+            return
+        alert.enabled = not alert.enabled
+        if alert.enabled:
+            alert.trigger_on_next_check = False
+        self._save_config()
+        self._refresh_alerts_list()
+        self.msg_label.setText(f"Alerta {alert.currency} {'activada' if alert.enabled else 'desactivada'}.")
+
+    def _delete_alert(self):
+        alert = self._selected_alert()
+        if alert is None:
+            self.msg_label.setText("Selecciona una alerta para eliminar.")
+            return
+        self.config_manager.delete_alert(self.config, alert.id)
+        self._save_config()
+        self._refresh_alerts_list()
+        self.msg_label.setText(f"Alerta {alert.currency} eliminada.")
+
+    # ──────────────────────────────────────────────── Check Alerts Logic
+    # ---------------------------------------------------------------------
+
+    def _check_alerts(self):
         base = self.config.base_currency
         now = datetime.now(timezone.utc)
+        before = [(a.id, a.enabled, a.last_fired_at) for a in self.config.alerts]
 
         for alert in list(self.config.alerts):
-            if not alert.enabled:
+            if not alert.enabled or alert.currency == base:
                 continue
-            if alert.currency == base:
+            cs = self.rates_state.get(alert.currency)
+            if cs is None:
                 continue
-
-            currency_state = self.rates_state.get(alert.currency)
-            if currency_state is None:
-                continue
-
-            current = currency_state.get("rate")
+            current = cs.get("rate")
             if current is None:
                 continue
 
             if is_periodic(alert):
-                # Informe periódico: solo envía cuando ha pasado el periodo y
-                # existe una referencia de precio anterior para el informe.
                 if self._check_periodic(alert, current, base, now):
                     if alert.notify_once:
                         alert.enabled = False
-                        self._schedule_alerts_table_refresh()
+                        self._refresh_alerts_list()
                 continue
 
-            previous = currency_state.get("prev")
-            # Solo evaluamos la primera vez que hay un precio real (evita
-            # disparos inmediatos con el primer dato recién cargado).
+            previous = cs.get("prev")
             if alert.trigger_on_next_check is False and previous is None:
                 alert.trigger_on_next_check = True
                 continue
@@ -939,51 +1343,38 @@ class CurrencyWatcherUI:
                 self._fire_alert(alert, current, base, description)
                 if alert.notify_once:
                     alert.enabled = False
-                    self._schedule_alerts_table_refresh()
+                    self._refresh_alerts_list()
 
-        self._save_config()
+        after = [(a.id, a.enabled, a.last_fired_at) for a in self.config.alerts]
+        if before != after:
+            self._save_config()
 
-    def _check_periodic(self, alert: Alert, current: float, base: str, now: datetime) -> bool:
-        """Gestiona una alerta periódica: decide si toca enviar el informe.
-
-        Almacena la primera observación como referencia; a partir de ahí, cuando
-        transcurre el periodo configurado, envía un informe de comportamiento.
-        """
+    def _check_periodic(self, alert, current, base, now):
         alert_id = alert.id
         ref = self.periodic_refs.get(alert_id)
-
         if ref is None:
-            # Primera vez: guardamos la referencia y esperamos al periodo.
             self.periodic_refs[alert_id] = {
                 "price": current,
-                "time": datetime.now().strftime("%H:%M:%S"),
+                "time": now.isoformat(timespec="seconds"),
             }
             return False
 
-        # ¿Ha pasado el periodo desde el último envío?
         last_fired = self._parse_iso(alert.last_fired_at) or self._parse_iso(ref.get("time"))
-        if last_fired is not None:
-            elapsed_h = (now - last_fired).total_seconds() / 3600.0
-        else:
-            elapsed_h = 0.0
-
+        elapsed_h = (now - last_fired).total_seconds() / 3600.0 if last_fired else 0.0
         if elapsed_h < alert.period_hours:
             return False
 
-        # Enviamos el informe de comportamiento comparando con la referencia.
-        new_ref_price = ref.get("price")
-        self._fire_periodic_report(alert, new_ref_price, current, base, ref.get("time"), now)
+        ref_price = ref.get("price")
+        self._fire_periodic_report(alert, ref_price, current, base, ref.get("time"), now)
         alert.last_fired_at = now.isoformat(timespec="seconds")
-        # Actualizamos la referencia para el siguiente periodo.
         self.periodic_refs[alert_id] = {
             "price": current,
-            "time": datetime.now().strftime("%H:%M:%S"),
+            "time": now.isoformat(timespec="seconds"),
         }
         return True
 
     @staticmethod
-    def _parse_iso(value: str | None) -> datetime | None:
-        """Convierte una marca de tiempo ISO a datetime naíve en UTC. Devuelve None si es inválida."""
+    def _parse_iso(value):
         if not value:
             return None
         try:
@@ -994,19 +1385,9 @@ class CurrencyWatcherUI:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
 
-    def _fire_periodic_report(
-        self,
-        alert: Alert,
-        ref_price: float | None,
-        current: float,
-        base: str,
-        ref_time: str | None,
-        now: datetime,
-    ) -> None:
-        """Envía un informe de comportamiento de la moneda en el periodo."""
+    def _fire_periodic_report(self, alert, ref_price, current, base, ref_time, now):
         currency_name = SUPPORTED_CURRENCIES.get(alert.currency, alert.currency)
-        from_time = ref_time or "la última actualización"
-        title = "Informe de moneda"
+        ref_dt = self._parse_iso(ref_time)
         period_label = PERIOD_OPTIONS.get(alert.period_hours, f"{alert.period_hours} h").lower()
 
         lines = [
@@ -1015,27 +1396,25 @@ class CurrencyWatcherUI:
             f"Precio actual: {current:.6g}",
         ]
         if ref_price is not None and ref_price > 0:
-            pct_change = ((current - ref_price) / ref_price) * 100.0
+            pct = ((current - ref_price) / ref_price) * 100.0
             diff = current - ref_price
             arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "•")
             trend = "ha subido" if diff > 0 else ("ha bajado" if diff < 0 else "se ha mantenido")
-            ref_label = f"la actualización de las {from_time}" if from_time else "la última actualización"
-            lines.append(f"Respecto a {ref_label}: {arrow} {diff:+.6g} ({pct_change:+.2f}%).")
+            ref_label = f"la actualización de las {ref_dt.strftime('%H:%M:%S')}" if ref_dt else "la última actualización"
+            lines.append(f"Respecto a {ref_label}: {arrow} {diff:+.6g} ({pct:+.2f}%).")
             lines.append(f"La moneda {alert.currency} {trend} en este periodo.")
         else:
             lines.append("Sin referencia previa para calcular la variación.")
         lines.append(f"Hora: {now.strftime('%H:%M:%S')}")
 
         try:
-            notify(title, "\n".join(lines))
+            notify("Informe de moneda", "\n".join(lines))
         except Exception:
             pass
 
-    def _fire_alert(self, alert: Alert, current: float, base: str, description: str) -> None:
-        """Dispara una notificación de escritorio cuando la alerta se cumple."""
+    def _fire_alert(self, alert, current, base, description):
         now = datetime.now().strftime("%H:%M:%S")
         currency_name = SUPPORTED_CURRENCIES.get(alert.currency, alert.currency)
-        title = "Alerta de moneda"
         message = (
             f"La moneda {alert.currency} ({currency_name}) ha cumplido la condición.\n"
             f"Precio actual: {current:.6g}\n"
@@ -1044,31 +1423,133 @@ class CurrencyWatcherUI:
             f"Hora: {now}"
         )
         try:
-            notify(title, message)
+            notify("Alerta de moneda", message)
         except Exception:
             pass
 
-    def _schedule_alerts_table_refresh(self) -> None:
-        """Refresca la tabla de alertas en el siguiente ciclo de eventos (seguro para hilos)."""
-        def _cb() -> None:
-            self._refresh_alerts_table()
-        self.root.after(0, _cb)
+    # ──────────────────────────────────────────────── Notification / History
+    # ------------------------------------------------------------------------
 
-    # --------------------------------------------------- misc / persistencia
+    def _in_app_notification(self, title, message):
+        self.notification_log.append(f"{title}: {message}")
+        if len(self.notification_log) > 50:
+            self.notification_log = self.notification_log[-50:]
+        QTimer.singleShot(0, lambda: self.msg_label.setText(f"{title}: {message}"))
 
-    def _in_app_notification(self, title: str, message: str) -> None:
-        """Fallback: muestra la notificación dentro de la aplicación si no hay notify-send."""
-        self._push_notification(f"{title}: {message}")
-        self.root.after(0, lambda: self._set_message(f"{title}: {message}", "info"))
+    def _show_history(self):
+        dlg = HistoryDialog(self.notification_log, self)
+        dlg.exec()
 
-    def _save_config(self) -> None:
+    # ──────────────────────────────────────────────── Export
+    # ---------------------------------------------------------------
+
+    def _build_history_matrix(self) -> tuple[str, list[str], list[str], dict[str, dict[str, float]]]:
+        """Reúne el historial en una matriz: {moneda: {ts: rate}}.
+
+        Devuelve (base, currencies, timestamps_ordenados, matrix).
+        """
+        base = self.config.base_currency
+        currencies = list(SUPPORTED_CURRENCIES)
+        by_currency: dict[str, dict[str, float]] = {c: {} for c in currencies}
+        if self.history is not None:
+            for currency in currencies:
+                for sample in self.history.series(base, currency, hours=24 * 30, limit=10000):
+                    by_currency[currency][sample["ts"]] = sample["rate"]
+        timestamps = sorted(set().union(*(c.keys() for c in by_currency.values())))
+        return base, currencies, timestamps, by_currency
+
+    def _export(self):
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Exportar datos", f"rates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "CSV (*.csv);;JSON (*.json)",
+        )
+        if not path:
+            return
+        try:
+            p = Path(path)
+            if path.endswith(".json"):
+                base, currencies, timestamps, by_currency = self._build_history_matrix()
+                payload = {
+                    "base": base,
+                    "exported_at": datetime.now().isoformat(timespec="seconds"),
+                    "currencies": currencies,
+                    "samples": [
+                        {"ts": ts, **{c: by_currency[c].get(ts) for c in currencies}}
+                        for ts in timestamps
+                    ],
+                }
+                p.write_text(
+                    json.dumps(payload, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            else:
+                base, currencies, timestamps, by_currency = self._build_history_matrix()
+                with open(p, "w", encoding="utf-8", newline="") as fh:
+                    writer = csv.writer(fh)
+                    writer.writerow(["base", "ts", *currencies])
+                    for ts in timestamps:
+                        writer.writerow([
+                            base,
+                            ts,
+                            *(by_currency[c].get(ts, "") for c in currencies),
+                        ])
+            self.msg_label.setText(f"Exportado: {p.name}")
+        except Exception as exc:
+            self.msg_label.setText(f"No se pudo exportar: {exc}")
+
+    # ──────────────────────────────────────────────── System Tray
+    # ---------------------------------------------------------------
+
+    def _setup_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        self._tray = QSystemTrayIcon(self)
+        self._tray.setToolTip("Currency Watcher")
+        tray_menu = QMenu()
+        show_action = tray_menu.addAction("Mostrar")
+        show_action.triggered.connect(self._show_from_tray)
+        quit_action = tray_menu.addAction("Salir")
+        quit_action.triggered.connect(self._real_close)
+        self._tray.setContextMenu(tray_menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._show_from_tray()
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.activateWindow()
+
+    # ──────────────────────────────────────────────── Misc / Status
+    # ---------------------------------------------------------------
+
+    def _set_status(self, text):
+        self.status_label.setText(f"● {text}")
+
+    def _save_config(self):
         self.config_manager.save(self.config)
 
-    def on_close(self) -> None:
+    def _shutdown(self):
+        """Detiene el worker y cierra el historial de forma ordenada."""
+        if hasattr(self, '_worker'):
+            self._worker.stop()
+        if self.history is not None:
+            self.history.close()
+
+    def closeEvent(self, event):
         self._save_config()
-        self.root.destroy()
+        if hasattr(self, '_tray') and self._tray.isVisible():
+            self.hide()
+            event.ignore()
+        else:
+            self._shutdown()
+            event.accept()
 
-
-def _alert_line(alert: Alert) -> str:
-    """Devuelve una línea de texto legible para la lista de alertas."""
-    return describe_condition(alert)
+    def _real_close(self):
+        self._save_config()
+        if hasattr(self, '_tray'):
+            self._tray.hide()
+        self._shutdown()
+        QApplication.instance().quit()

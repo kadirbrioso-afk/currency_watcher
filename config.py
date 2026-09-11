@@ -40,6 +40,10 @@ SUPPORTED_CURRENCIES: dict[str, str] = {
     "LINK": "Chainlink",
 }
 
+# Monedas fiat soportadas (la moneda base solo puede ser fiat; las criptomonedas
+# se convierten siempre a través de USD y no se admiten como base).
+FIAT_CURRENCIES: list[str] = ["USD", "EUR", "GBP", "JPY", "CNY", "PEN", "RUB"]
+
 # Símbolo monetario para cada moneda soportada (se muestra en la columna "Símbolo").
 CURRENCY_SYMBOLS: dict[str, str] = {
     "EUR": "€",
@@ -104,21 +108,93 @@ THRESHOLD_CONDITIONS = {
 # Condición de informe periódico (no requiere valor objetivo).
 PERIODIC_CONDITION = "periodic"
 
-# Temas disponibles para la interfaz (ttkbootstrap).
-THEMES: list[str] = [
-    "darkly",
-    "flatly",
-    "superhero",
-    "journal",
-    "litera",
-    "minty",
-    "pulse",
-    "sandstone",
-    "united",
-    "yeti",
-    "cyborg",
-    "vapor",
-]
+# Temas disponibles para la interfaz (PySide6 QSS).
+THEMES: dict[str, dict[str, str]] = {
+    "dark": {
+        "bg": "#1a1a2e",
+        "fg": "#e0e0e0",
+        "surface": "#16213e",
+        "accent": "#0f3460",
+        "accent_fg": "#e0e0e0",
+        "success": "#2ecc71",
+        "danger": "#e74c3c",
+        "warning": "#f39c12",
+        "info": "#3498db",
+        "border": "#2c3e50",
+    },
+    "darkly": {
+        "bg": "#222",
+        "fg": "#fff",
+        "surface": "#333",
+        "accent": "#375a7f",
+        "accent_fg": "#fff",
+        "success": "#00bc8c",
+        "danger": "#e74c3c",
+        "warning": "#f39c12",
+        "info": "#3498db",
+        "border": "#444",
+    },
+    "superhero": {
+        "bg": "#2b3e50",
+        "fg": "#fff",
+        "surface": "#3b5568",
+        "accent": "#df691a",
+        "accent_fg": "#fff",
+        "success": "#5cb85c",
+        "danger": "#d9534f",
+        "warning": "#f0ad4e",
+        "info": "#5bc0de",
+        "border": "#4e5d6c",
+    },
+    "cyborg": {
+        "bg": "#060606",
+        "fg": "#adafae",
+        "surface": "#111",
+        "accent": "#2a9fd6",
+        "accent_fg": "#fff",
+        "success": "#77b300",
+        "danger": "#cc0000",
+        "warning": "#ff8800",
+        "info": "#9933cc",
+        "border": "#282828",
+    },
+    "light": {
+        "bg": "#f8f9fa",
+        "fg": "#212529",
+        "surface": "#fff",
+        "accent": "#0d6efd",
+        "accent_fg": "#fff",
+        "success": "#198754",
+        "danger": "#dc3545",
+        "warning": "#ffc107",
+        "info": "#0dcaf0",
+        "border": "#dee2e6",
+    },
+    "flatly": {
+        "bg": "#fff",
+        "fg": "#212529",
+        "surface": "#fff",
+        "accent": "#2c3e50",
+        "accent_fg": "#fff",
+        "success": "#18bc9c",
+        "danger": "#e74c3c",
+        "warning": "#f39c12",
+        "info": "#3498db",
+        "border": "#dee2e6",
+    },
+    "minty": {
+        "bg": "#fff",
+        "fg": "#555",
+        "surface": "#fff",
+        "accent": "#1abc9c",
+        "accent_fg": "#fff",
+        "success": "#00b16a",
+        "danger": "#e74c3c",
+        "warning": "#f39c12",
+        "info": "#3498db",
+        "border": "#ddd",
+    },
+}
 
 
 def _now_iso() -> str:
