@@ -10,6 +10,10 @@ claro/oscuro y **exportación** a CSV/JSON.
 Construida con **Python 3.10+** (desarrollada y probada en **3.14.7**),
 **PySide6**, **asyncio** y **aiohttp**.
 
+<p align="center">
+  <img src="icon.png" width="160" alt="Icono de Currency Watcher">
+</p>
+
 ## Monedas soportadas
 
 | Código | Nombre |
@@ -146,6 +150,13 @@ Resultados:
 > se purgan además los plugins Qt que arrastran librerías anchas (QtPdf,
 > QtQuick/Qml y KDE Breeze); el resultado pesa ~230 MB en directorio y ~95 MB
 > comprimido.
+>
+> El **icono** (`icon.png`, en la raíz del proyecto) se copia como dato a
+> `dist/currency-watcher/_internal/icon.png` y además se **embebe en el propio
+> ejecutable** (`icon='icon.png'` en el spec), de modo que la ventana, barra de
+> tareas y bandeja del sistema muestran el icono también en la versión
+> empaquetada. Si quieres otro icono, sustituye `icon.png` y vuelve a ejecutar
+> `./build.sh`.
 
 Para ejecutar la app empaquetada:
 

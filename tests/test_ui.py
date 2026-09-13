@@ -14,7 +14,7 @@ pytest.importorskip("PySide6", reason="PySide6 no está instalado en este intér
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from config import Config, ConfigManager
-from ui import MainWindow, Alert  # noqa: F401
+from ui import MainWindow, Alert, asset_path  # noqa: F401
 
 
 def test_mainwindow_builds_offscreen(tmp_path):
@@ -29,6 +29,19 @@ def test_mainwindow_builds_offscreen(tmp_path):
         # El combo de moneda del gráfico excluye la base.
         assert win.chart_currency_combo.findData(config.base_currency) < 0
         win._save_config()
+    finally:
+        win._shutdown()
+
+
+def test_app_icon_asset(tmp_path):
+    """El icono existe en la raíz (asset_path) y la ventana lo usa."""
+    assert asset_path("icon.png").is_file()
+    app = QApplication.instance() or QApplication([])
+    cm = ConfigManager(tmp_path / "config.json")
+    win = MainWindow(cm.load(), cm, history=None)
+    try:
+        assert not win.windowIcon().isNull()
+        assert win.spinner is not None
     finally:
         win._shutdown()
 
