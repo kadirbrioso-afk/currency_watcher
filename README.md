@@ -109,6 +109,7 @@ currency_watcher/
 ├── sounds.py        # Reproducción de sonido de alerta (canberra / paplay / aplay / ffplay).
 ├── history.py       # Historial SQLite (WAL) con retención de 90 días.
 ├── config.py        # Configuración persistente, monedas soportadas y temas (JSON).
+├── icon.png         # Icono de la ventana/bandeja (se incluye al empaquetar).
 ├── build.sh         # Automatiza el empaquetado con PyInstaller (--onedir).
 ├── currency-watcher.spec  # Spec de PyInstaller (excluye módulos Qt no usados).
 ├── tests/           # Tests (pytest): alerts, config, history y smoke de la GUI.
@@ -181,6 +182,12 @@ PySide6; si el entorno no tiene PySide6 instalado se omiten automáticamente
   (columna por moneda), con el nombre de archivo `rates_<fecha>.csv/json`.
 - **Temas claro/oscuro** configurables (p. ej. `cyborg`, `solar`, `light`)
   aplicados vía QSS; se guardan en `config.json`.
+- **Animaciones**: *spinner* giratorio mientras se refrescan las tasas,
+  dibujo animado del gráfico (la línea "se dibuja" de izquierda a derecha) y
+  destello de color en el estado al actualizar o ante un error.
+- **Icono de la aplicación**: `icon.png` (raíz del proyecto) se muestra en la
+  ventana, la bandeja del sistema y los diálogos; al empaquetar se incluye como
+  dato en `_internal` y se embebe en el propio ejecutable.
 - **Actualización automática asíncrona** con intervalo configurable
   (30 s, 1 min, 5 min), botón de actualización manual, y para iniciar/parar
   la actualización automática. Barra de estado: actualizando / actualizado /

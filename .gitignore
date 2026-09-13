@@ -8,7 +8,6 @@ __pycache__/
 # PyInstaller
 build/
 dist/
-currency-watcher.spec
 
 # Entorno de build genérico
 /tmp/

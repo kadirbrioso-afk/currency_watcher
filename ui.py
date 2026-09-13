@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QIcon,
     QPainter,
     QPainterPath,
     QPen,
@@ -308,10 +310,23 @@ def build_qss(theme: dict[str, str]) -> str:
 # ──────────────────────────────────────────────────────────── Worker Thread
 # -----------------------------------------------------------------------
 
+def asset_path(name: str) -> Path:
+    """Resuelve la ruta de un asset (p. ej. icon.png) en código o empaquetado.
+
+    - En el bundle de PyInstaller, los assets viajan en ``sys._MEIPASS``.
+    - En desarrollo, junto al módulo (raíz del proyecto).
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return Path(base) / name
+    return Path(__file__).resolve().parent / name
+
+
 class _WorkerSignals(QObject):
     """Señales que el worker emite hacia la UI (seguras entre hilos)."""
     rates_ready = Signal(dict)
     error = Signal(str)
+    loading = Signal(bool)
 
 
 class _WorkerThread(QThread):
@@ -327,6 +342,7 @@ class _WorkerThread(QThread):
 
     def request_refresh(self):
         if self._loop is not None:
+            self.signals.loading.emit(True)
             import asyncio
             asyncio.run_coroutine_threadsafe(self._do_refresh(), self._loop)
 
@@ -353,6 +369,8 @@ class _WorkerThread(QThread):
             self.signals.rates_ready.emit({"rates": rates, "base": base, "stamp": stamp})
         except Exception as exc:
             self.signals.error.emit(str(exc))
+        finally:
+            self.signals.loading.emit(False)
 
     def run(self):
         import asyncio
@@ -449,6 +467,10 @@ class ChartWidget(QWidget):
         self._currency_name = "Euro"
         self._range_label = "24h"
         self._hover_index: int | None = None
+        self._progress = 1.0  # progreso de la animación de dibujo (0→1)
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)
+        self._anim_timer.timeout.connect(self._anim_step)
         self.setMouseTracking(True)
 
     def set_data(self, series: list[dict[str, Any]], currency: str, range_label: str):
@@ -457,6 +479,19 @@ class ChartWidget(QWidget):
         self._currency_name = SUPPORTED_CURRENCIES.get(currency, currency)
         self._range_label = range_label
         self._hover_index = None
+        if len(series) >= 2:
+            self._progress = 0.0
+            if not self._anim_timer.isActive():
+                self._anim_timer.start()
+        else:
+            self._progress = 1.0
+            self._anim_timer.stop()
+        self.update()
+
+    def _anim_step(self):
+        self._progress = min(1.0, self._progress + 0.07)
+        if self._progress >= 1.0:
+            self._anim_timer.stop()
         self.update()
 
     def paintEvent(self, event):
@@ -483,6 +518,12 @@ class ChartWidget(QWidget):
         plot_h = h - margin_bottom - margin_top
         plot_w = w - 2 * pad
 
+        # Animación: solo se dibuja la porción ya "revelada" del historial.
+        n_anim = max(0, int(len(rates) * self._progress))
+        plot = rates[:n_anim]
+        if not plot:
+            plot = rates[:1]
+
         def sx(i):
             if len(rates) <= 1:
                 return pad + 1
@@ -495,9 +536,9 @@ class ChartWidget(QWidget):
         # Área sombreada
         path = QPainterPath()
         path.moveTo(sx(0), margin_top + plot_h)
-        for i, r in enumerate(rates):
+        for i, r in enumerate(plot):
             path.lineTo(sx(i), sy(r))
-        path.lineTo(sx(len(rates) - 1), margin_top + plot_h)
+        path.lineTo(sx(len(plot) - 1), margin_top + plot_h)
         path.closeSubpath()
         brush = QBrush(QColor(46, 204, 113, 60))
         painter.setBrush(brush)
@@ -508,12 +549,12 @@ class ChartWidget(QWidget):
         pen = QPen(QColor(COLOR_UP), 2)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
-        polyline = [QPointF(sx(i), sy(r)) for i, r in enumerate(rates)]
+        polyline = [QPointF(sx(i), sy(r)) for i, r in enumerate(plot)]
         painter.drawPolyline(polyline)
 
         # Hover tooltip
-        if self._hover_index is not None and 0 <= self._hover_index < len(rates):
-            idx = self._hover_index
+        if self._hover_index is not None and n_anim > 0:
+            idx = min(self._hover_index, n_anim - 1)
             x, y = sx(idx), sy(rates[idx])
             painter.setPen(QPen(QColor("#fff"), 1))
             painter.setBrush(QBrush(QColor("#fff")))
@@ -609,6 +650,44 @@ class ChartWidget(QWidget):
         if dt.date() == datetime.now().date():
             return dt.strftime("%H:%M")
         return dt.strftime("%d/%m %H:%M")
+
+
+# ──────────────────────────────────────────────────────────── Spinner (QPainter)
+# ---------------------------------------------------------------------------
+
+class Spinner(QWidget):
+    """Indicador circular animado mostrado mientras se refrescan las tasas."""
+
+    def __init__(self, parent=None, size: int = 16):
+        super().__init__(parent)
+        self._angle = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+        self.setFixedSize(size, size)
+        self.setVisible(False)
+
+    def _tick(self):
+        self._angle = (self._angle + 10) % 360
+        self.update()
+
+    def start(self):
+        self.setVisible(True)
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self.setVisible(False)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(2, 2, self.width() - 4, self.height() - 4)
+        painter.setPen(QPen(QColor("#3a3f58"), 2))
+        painter.drawArc(rect, 0, 360 * 16)
+        painter.setPen(QPen(QColor(COLOR_FAV), 2))
+        painter.drawArc(rect, -(self._angle % 360) * 16, 110 * 16)
+        painter.end()
 
 
 # ──────────────────────────────────────────────────────── Alert Dialog (QDialog)
@@ -804,6 +883,7 @@ class MainWindow(QMainWindow):
         self.history = history
 
         self.setWindowTitle("Currency Watcher — Monitor de tipos de cambio")
+        self.setWindowIcon(QIcon(str(asset_path("icon.png"))))
         self.resize(980, 800)
         self.setMinimumSize(860, 660)
 
@@ -822,6 +902,7 @@ class MainWindow(QMainWindow):
         )
         self._worker.signals.rates_ready.connect(self._on_rates)
         self._worker.signals.error.connect(self._on_error)
+        self._worker.signals.loading.connect(self._on_loading)
 
         self._build_ui()
         self._apply_theme(config.theme)
@@ -915,6 +996,10 @@ class MainWindow(QMainWindow):
         btn_refresh = QPushButton("Actualizar")
         btn_refresh.clicked.connect(self._worker.request_refresh)
         toolbar.addWidget(btn_refresh)
+
+        self.spinner = Spinner(self)
+        self.spinner.setToolTip("Actualizando tasas…")
+        toolbar.addWidget(self.spinner)
 
         toolbar.addWidget(QLabel("Intervalo:"))
         self.interval_combo = QComboBox()
@@ -1145,6 +1230,12 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────────── Data / Rendering
     # ----------------------------------------------------------------------
 
+    def _on_loading(self, loading: bool):
+        if loading:
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+
     @Slot(dict)
     def _on_rates(self, item: dict):
         rates = item["rates"]
@@ -1161,13 +1252,13 @@ class MainWindow(QMainWindow):
         self._render_table(base, now)
         self._render_chart()
         self._check_alerts()
-        self._set_status(f"Actualizado {now}")
+        self._flash_status(f"Actualizado {now}", COLOR_UP)
         self.msg_label.setText("")
 
     @Slot(str)
     def _on_error(self, message: str):
         now = datetime.now().strftime("%H:%M:%S")
-        self._set_status(f"Error {now}")
+        self._flash_status(f"Error {now}", COLOR_DOWN)
         self.msg_label.setText(message)
         self.msg_label.setStyleSheet(f"color: {COLOR_DOWN};")
         for code in SUPPORTED_CURRENCIES:
@@ -1504,6 +1595,7 @@ class MainWindow(QMainWindow):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         self._tray = QSystemTrayIcon(self)
+        self._tray.setIcon(QIcon(str(asset_path("icon.png"))))
         self._tray.setToolTip("Currency Watcher")
         tray_menu = QMenu()
         show_action = tray_menu.addAction("Mostrar")
@@ -1525,8 +1617,14 @@ class MainWindow(QMainWindow):
     # ──────────────────────────────────────────────── Misc / Status
     # ---------------------------------------------------------------
 
-    def _set_status(self, text):
+    def _set_status(self, text, color=None):
         self.status_label.setText(f"● {text}")
+        self.status_label.setStyleSheet(f"color: {color}; font-weight: bold;" if color else "")
+
+    def _flash_status(self, text, color):
+        """Muestra el estado con un destello de color que se desvanece."""
+        self._set_status(text, color)
+        QTimer.singleShot(900, lambda: self._set_status(text))
 
     def _save_config(self):
         self.config_manager.save(self.config)

@@ -14,11 +14,12 @@ from __future__ import annotations
 import logging
 import sys
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from config import ConfigManager, FIAT_CURRENCIES
 from history import HistoryStore
-from ui import MainWindow
+from ui import MainWindow, asset_path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("currency_watcher")
@@ -32,6 +33,7 @@ def main() -> None:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Currency Watcher")
+    app.setWindowIcon(QIcon(str(asset_path("icon.png"))))
 
     history = HistoryStore()
     history.connect()
